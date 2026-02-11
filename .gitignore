@@ -9,3 +9,5 @@ build/
 .env.*
 *.log
 .agent/
+.vercel/
+tsconfig.tsbuildinfo
