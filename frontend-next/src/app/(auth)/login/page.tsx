@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Card from "@/components/ui/Card";
 import LoginForm from "@/components/auth/LoginForm";
 
@@ -15,7 +16,9 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <LoginForm />
+        <Suspense fallback={<div>Carregando formulário...</div>}>
+          <LoginForm />
+        </Suspense>
 
         <div className="mt-6 text-xs text-zinc-500">
           Placeholder. Autenticação via Supabase entra na próxima etapa.
