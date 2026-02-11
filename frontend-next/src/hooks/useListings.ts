@@ -61,7 +61,7 @@ export function useListings(
   initialFilters: ListingsFilters = { maxDaysFresh: 15 }
 ): UseListingsResult {
   const [filters, setFiltersState] = useState<ListingsFilters>({
-    maxDaysFresh: 15,
+
     sort: "date_desc",
     ...initialFilters
   });

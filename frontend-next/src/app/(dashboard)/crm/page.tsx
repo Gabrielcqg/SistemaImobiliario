@@ -135,7 +135,7 @@ export default function CrmPage() {
     phone: "",
     data_retorno: "",
     descricao_contexto: "",
-    status_pipeline: PIPELINE_STEPS[0].value
+    status_pipeline: PIPELINE_STEPS[0].value as string
   });
   const [isCreatingClient, setIsCreatingClient] = useState(false);
   const [clientSaving, setClientSaving] = useState(false);
@@ -497,7 +497,7 @@ export default function CrmPage() {
       console.error("Erro ao buscar matches:", error);
     } else {
       const rows = await enrichMatchesWithListings(
-        ((data as Match[]) ?? []).map((row) => ({ ...row })),
+        ((data as unknown as Match[]) ?? []).map((row) => ({ ...row })),
         "pendentes"
       );
       const filtered = filterByPriceRange(rows, filterOverride);
@@ -532,7 +532,7 @@ export default function CrmPage() {
       console.error("Erro ao buscar curadoria:", error);
     } else {
       const rows = await enrichMatchesWithListings(
-        ((data as Match[]) ?? []).map((row) => ({ ...row })),
+        ((data as unknown as Match[]) ?? []).map((row) => ({ ...row })),
         "curadoria"
       );
       const filtered = filterByPriceRange(rows, filterOverride);
@@ -567,7 +567,7 @@ export default function CrmPage() {
       console.error("Erro ao buscar arquivados:", error);
     } else {
       const rows = await enrichMatchesWithListings(
-        ((data as Match[]) ?? []).map((row) => ({ ...row })),
+        ((data as unknown as Match[]) ?? []).map((row) => ({ ...row })),
         "arquivados"
       );
       const filtered = filterByPriceRange(rows, filterOverride);
@@ -1020,39 +1020,38 @@ export default function CrmPage() {
               clients.map((client) => {
                 const alertCount = clientAlerts[client.id] ?? 0;
                 return (
-                <button
-                  key={client.id}
-                  type="button"
-                  onClick={() => {
-                    setIsCreatingClient(false);
-                    setSelectedClientId(client.id);
-                    resetDraftFromClient(client);
-                  }}
-                  className={`w-full rounded-lg border px-4 py-3 text-left text-sm transition ${
-                    selectedClientId === client.id && !isCreatingClient
+                  <button
+                    key={client.id}
+                    type="button"
+                    onClick={() => {
+                      setIsCreatingClient(false);
+                      setSelectedClientId(client.id);
+                      resetDraftFromClient(client);
+                    }}
+                    className={`w-full rounded-lg border px-4 py-3 text-left text-sm transition ${selectedClientId === client.id && !isCreatingClient
                       ? "border-white bg-white text-black"
                       : "border-zinc-800 text-zinc-300 hover:bg-white/10"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <p className="font-semibold">{client.name}</p>
-                      <p className="text-xs text-zinc-500">
-                        {client.contact_info?.email ||
-                          client.contact_info?.phone ||
-                          "Sem contato"}
-                      </p>
+                      }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="font-semibold">{client.name}</p>
+                        <p className="text-xs text-zinc-500">
+                          {client.contact_info?.email ||
+                            client.contact_info?.phone ||
+                            "Sem contato"}
+                        </p>
+                      </div>
+                      {alertCount > 0 ? (
+                        <span className="relative flex h-2.5 w-2.5 items-center justify-center">
+                          <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-white/50 shadow-[0_0_12px_rgba(255,255,255,0.6)]" />
+                          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.8)]" />
+                        </span>
+                      ) : null}
                     </div>
-                    {alertCount > 0 ? (
-                      <span className="relative flex h-2.5 w-2.5 items-center justify-center">
-                        <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-white/50 shadow-[0_0_12px_rgba(255,255,255,0.6)]" />
-                        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.8)]" />
-                      </span>
-                    ) : null}
-                  </div>
-                </button>
-              );
-            })
+                  </button>
+                );
+              })
             )}
           </div>
         </Card>
@@ -1082,11 +1081,10 @@ export default function CrmPage() {
                       key={step.value}
                       type="button"
                       onClick={() => handlePipelineChange(step.value)}
-                      className={`rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.3em] transition ${
-                        active
-                          ? "border-white bg-white text-black"
-                          : "border-zinc-800 text-zinc-400 hover:text-white"
-                      }`}
+                      className={`rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.3em] transition ${active
+                        ? "border-white bg-white text-black"
+                        : "border-zinc-800 text-zinc-400 hover:text-white"
+                        }`}
                     >
                       {step.label}
                     </button>
@@ -1354,9 +1352,8 @@ export default function CrmPage() {
                             handleSwipe(match, "left");
                           }
                         }}
-                        className={`absolute inset-0 rounded-2xl border border-zinc-800 bg-black/60 p-6 shadow-glow backdrop-blur-md overflow-hidden ${
-                          isTop ? "pointer-events-auto" : "pointer-events-none"
-                        }`}
+                        className={`absolute inset-0 rounded-2xl border border-zinc-800 bg-black/60 p-6 shadow-glow backdrop-blur-md overflow-hidden ${isTop ? "pointer-events-auto" : "pointer-events-none"
+                          }`}
                         style={{ zIndex: 10 - index }}
                       >
                         <div className="pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-white/5 to-transparent" />
@@ -1575,10 +1572,10 @@ export default function CrmPage() {
                           {getNeighborhood(match.listing)}
                         </p>
                       </div>
-                        <div className="flex flex-col items-end gap-2 text-xs text-zinc-500">
-                          <span>
-                            {formatCurrency(match.listing?.price ?? null)}
-                          </span>
+                      <div className="flex flex-col items-end gap-2 text-xs text-zinc-500">
+                        <span>
+                          {formatCurrency(match.listing?.price ?? null)}
+                        </span>
                         <div className="flex items-center gap-2">
                           <Button
                             variant="ghost"
