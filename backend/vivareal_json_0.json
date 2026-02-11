@@ -1,0 +1,19 @@
+{
+          "@context": "https://schema.org/",
+          "@type": "Organization",
+          "url": "https://www.vivareal.com.br",
+          "logo": "https://cdn-vivareal-ssr-prod.vivareal.com.br/assets/vivareal-blue.svg",
+          "name": "Viva Real",
+          "description":"Mais de 63.963 apartamentos à venda em Campinas, São Paulo. Acesse as melhores ofertas de venda de apartamentos em Campinas.",
+          "address": {
+            "@type": "PostalAddress",
+            "addressCountry": {
+              "@type": "Country",
+              "name": "BR"
+            },
+            "addressLocality": "São Paulo",
+            "addressRegion": "SP",
+            "postalCode": "01310-914",
+            "streetAddress": "Av. Paulista 1.106 - Bela Vista, São Paulo - SP"
+          }
+        }

@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-zinc-800;
+  }
+
+  body {
+    @apply bg-black text-white antialiased;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply bg-white/5 backdrop-blur-md border border-zinc-800 shadow-glow;
+  }
+}
