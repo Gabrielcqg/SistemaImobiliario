@@ -5,8 +5,10 @@ import { AnimatePresence, motion } from "framer-motion";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
+import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
+import { normalizeText } from "@/lib/format/text";
 
 type Client = {
   id: string;
@@ -150,6 +152,7 @@ export default function CrmPage() {
     max_days_fresh: "7",
     property_types: ""
   });
+  const [neighborhoodInput, setNeighborhoodInput] = useState("");
   const [filterSaving, setFilterSaving] = useState(false);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [matchesError, setMatchesError] = useState<string | null>(null);
@@ -188,6 +191,38 @@ export default function CrmPage() {
 
   const selectedClient =
     clients.find((client) => client.id === selectedClientId) ?? null;
+  const selectedNeighborhoods = useMemo(
+    () => toArray(filterDraft.neighborhoods),
+    [filterDraft.neighborhoods]
+  );
+
+  const setNeighborhoodList = (nextValues: string[]) => {
+    setFilterDraft((prev) => ({
+      ...prev,
+      neighborhoods: nextValues.join(", ")
+    }));
+  };
+
+  const addNeighborhood = (name: string) => {
+    const normalizedName = normalizeText(name);
+    if (!normalizedName) return;
+
+    const exists = selectedNeighborhoods.some(
+      (item) => normalizeText(item) === normalizedName
+    );
+    if (exists) return;
+
+    setNeighborhoodList([...selectedNeighborhoods, name.trim()]);
+  };
+
+  const removeNeighborhood = (name: string) => {
+    const normalizedName = normalizeText(name);
+    setNeighborhoodList(
+      selectedNeighborhoods.filter(
+        (item) => normalizeText(item) !== normalizedName
+      )
+    );
+  };
 
   const resetDraftFromClient = (client: Client | null) => {
     setClientDraft({
@@ -470,6 +505,7 @@ export default function CrmPage() {
         ? filter?.property_types.join(", ")
         : ""
     });
+    setNeighborhoodInput("");
 
     return filter;
   };
@@ -782,7 +818,7 @@ export default function CrmPage() {
     setFilterSaving(true);
     setFilterError(null);
 
-    const neighborhoods = toArray(filterDraft.neighborhoods);
+    const neighborhoods = selectedNeighborhoods;
     const propertyTypes = toArray(filterDraft.property_types);
 
     const payload: ClientFilter = {
@@ -1239,16 +1275,48 @@ export default function CrmPage() {
                 />
               </div>
 
-              <Input
-                placeholder="Bairros (separados por vírgula)"
-                value={filterDraft.neighborhoods}
-                onChange={(event) =>
-                  setFilterDraft((prev) => ({
-                    ...prev,
-                    neighborhoods: event.target.value
-                  }))
-                }
-              />
+              <div className="space-y-2">
+                <NeighborhoodAutocomplete
+                  label="Bairro"
+                  placeholder="Digite para buscar bairros"
+                  city="Campinas"
+                  value={neighborhoodInput}
+                  onChange={setNeighborhoodInput}
+                  onSelect={(item) => {
+                    addNeighborhood(item.name);
+                    setNeighborhoodInput("");
+                  }}
+                  onClear={() => {
+                    setNeighborhoodInput("");
+                    setNeighborhoodList([]);
+                  }}
+                />
+
+                {selectedNeighborhoods.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {selectedNeighborhoods.map((item) => (
+                      <span
+                        key={item}
+                        className="inline-flex items-center gap-2 rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-200"
+                      >
+                        {item}
+                        <button
+                          type="button"
+                          onClick={() => removeNeighborhood(item)}
+                          className="rounded-full p-0.5 text-zinc-400 transition hover:bg-white/10 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                          aria-label={`Remover bairro ${item}`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-zinc-500">
+                    Nenhum bairro selecionado.
+                  </p>
+                )}
+              </div>
 
               <div className="grid gap-3 md:grid-cols-2">
                 <Input

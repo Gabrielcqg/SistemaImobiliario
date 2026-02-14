@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { memo } from "react";
+import { dispatchNavigationStart } from "@/lib/navigation/progress";
 
 const navItems = [
   { label: "Buscador", href: "/buscador" },
@@ -36,6 +37,7 @@ function Sidebar() {
               href={item.href}
               prefetch
               onClick={() => {
+                dispatchNavigationStart();
                 if (process.env.NODE_ENV !== "production") {
                   (window as unknown as { __navPerf?: { start: number; href: string } })
                     .__navPerf = {

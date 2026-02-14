@@ -1,20 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { motion, useMotionValue, useTransform } from "framer-motion";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis
-} from "recharts";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import Button from "@/components/ui/Button";
+import SkeletonCard from "@/components/ui/SkeletonCard";
 import { useAnalytics } from "@/hooks/useAnalytics";
+import type { PortalChartDatum } from "@/components/analytics/PortalDistributionChart";
+
+const PortalDistributionChart = dynamic(
+  () => import("@/components/analytics/PortalDistributionChart"),
+  {
+    ssr: false,
+    loading: () => <SkeletonCard className="h-full" />
+  }
+);
 
 const dayOptions = [
   { label: "7 dias", value: 7 },
@@ -152,7 +154,7 @@ export default function AnalyticsPage() {
   const animatedPrice = useTweenedNumber(blendedPrice);
   const animatedPricePerM2 = useTweenedNumber(blendedPricePerM2);
 
-  const chartData = useMemo(
+  const chartData = useMemo<PortalChartDatum[]>(
     () =>
       portalStats.map((stat) => ({
         portal: stat.portal.toUpperCase(),
@@ -307,36 +309,9 @@ export default function AnalyticsPage() {
                   </div>
                 </div>
                 <div className="mt-6 h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData} barSize={32}>
-                      <CartesianGrid stroke="#27272a" vertical={false} />
-                      <XAxis
-                        dataKey="portal"
-                        stroke="#a1a1aa"
-                        tickLine={false}
-                        axisLine={false}
-                      />
-                      <YAxis
-                        stroke="#a1a1aa"
-                        tickLine={false}
-                        axisLine={false}
-                      />
-                      <Tooltip
-                        cursor={{ fill: "rgba(255,255,255,0.04)" }}
-                        contentStyle={{
-                          background: "#0a0a0a",
-                          border: "1px solid #27272a",
-                          color: "#f4f4f5"
-                        }}
-                      />
-                      <Bar
-                        dataKey="count"
-                        fill="#f4f4f5"
-                        radius={[8, 8, 0, 0]}
-                        animationDuration={700}
-                      />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  <Suspense fallback={<SkeletonCard className="h-full" />}>
+                    <PortalDistributionChart data={chartData} />
+                  </Suspense>
                 </div>
               </Card>
 

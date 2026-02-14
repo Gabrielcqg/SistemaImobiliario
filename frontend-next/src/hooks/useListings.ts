@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { normalizeText } from "@/lib/format/text";
 
 export type ListingsFilters = {
   maxDaysFresh: 7 | 15 | 30;
@@ -101,13 +102,11 @@ export function useListings(
         .gte("first_seen_at", cutoffDate)
         .range(page * pageSize, page * pageSize + pageSize - 1);
 
-      const neighborhoodValue =
-        debouncedFilters.neighborhood_normalized?.trim();
+      const neighborhoodValue = normalizeText(
+        debouncedFilters.neighborhood_normalized ?? ""
+      );
       if (neighborhoodValue) {
-        const pattern = `%${neighborhoodValue}%`;
-        query = query.or(
-          `neighborhood_normalized.ilike.${pattern},neighborhood.ilike.${pattern}`
-        );
+        query = query.like("neighborhood_normalized", `${neighborhoodValue}%`);
       }
 
       if (debouncedFilters.portal) {

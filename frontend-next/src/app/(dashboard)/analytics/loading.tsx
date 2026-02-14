@@ -1,16 +1,26 @@
+import PageSkeleton from "@/components/ui/PageSkeleton";
+import SkeletonCard from "@/components/ui/SkeletonCard";
+import SkeletonList from "@/components/ui/SkeletonList";
+
 export default function AnalyticsLoading() {
   return (
-    <div className="space-y-6">
-      <div className="h-6 w-40 rounded bg-white/10 animate-pulse" />
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, index) => (
-          <div
-            key={index}
-            className="h-40 rounded-2xl border border-zinc-800 bg-white/5 animate-pulse"
+    <PageSkeleton
+      titleWidthClassName="w-32"
+      subtitleWidthClassName="w-80"
+      metaWidthClassName="w-32"
+    >
+      <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
+        <SkeletonCard className="h-[420px]" />
+        <div className="space-y-6">
+          <SkeletonList
+            count={3}
+            className="grid gap-4 md:grid-cols-3"
+            cardClassName="h-32"
           />
-        ))}
+          <SkeletonCard className="h-80" />
+          <SkeletonCard className="h-64" />
+        </div>
       </div>
-      <div className="h-64 rounded-2xl border border-zinc-800 bg-white/5 animate-pulse" />
-    </div>
+    </PageSkeleton>
   );
 }

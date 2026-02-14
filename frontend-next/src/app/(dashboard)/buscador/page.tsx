@@ -1,15 +1,24 @@
 "use client";
 
-import { AnimatePresence } from "framer-motion";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
-import ListingCard from "@/components/radar/ListingCard";
-import RadarGlobe2D from "@/components/radar/RadarGlobe2D";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import SkeletonList from "@/components/ui/SkeletonList";
+import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
 import { useListings, type Listing } from "@/hooks/useListings";
 import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
+import { normalizeText } from "@/lib/format/text";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+
+const LazyRadarListingsGrid = dynamic(
+  () => import("@/components/radar/RadarListingsGrid"),
+  {
+    ssr: false,
+    loading: () => <SkeletonList />
+  }
+);
 
 const dayOptions = [
   { label: "7 dias", value: 7 },
@@ -21,11 +30,19 @@ const portals = ["", "vivareal", "zap", "imovelweb"] as const;
 const sortOptions = [
   { label: "Mais recentes", value: "date_desc" },
   { label: "Mais antigos", value: "date_asc" },
-  { label: "Preço: menor → maior", value: "price_asc" },
-  { label: "Preço: maior → menor", value: "price_desc" }
+  { label: "Preco: menor -> maior", value: "price_asc" },
+  { label: "Preco: maior -> menor", value: "price_desc" }
 ] as const;
 
 const portalBadges = ["vivareal", "zap", "imovelweb", "outros"] as const;
+type PortalBadge = (typeof portalBadges)[number];
+
+const portalFilterByBadge: Record<PortalBadge, string> = {
+  vivareal: "vivareal",
+  zap: "zap",
+  imovelweb: "imovelweb",
+  outros: ""
+};
 
 type RadarListing = Listing & {
   latitude?: number | null;
@@ -45,19 +62,7 @@ type RadarEvent = {
   at: number;
 };
 
-type PerfSnapshot = {
-  fps: number;
-  globeDrawMs: number;
-  globeFrames: number;
-  staticDrawMs: number;
-  staticDraws: number;
-  listUpdateMs: number;
-  listUpdates: number;
-  reactRenders: number;
-  resizeEvents: number;
-  realtimeEventsPerMin: number;
-  realtimeEvents: number;
-};
+const REALTIME_FLUSH_MS = 400;
 
 function useDebouncedValue<T>(value: T, delayMs: number) {
   const [debounced, setDebounced] = useState(value);
@@ -96,7 +101,6 @@ const formatRelativeTime = (date: Date) => {
 };
 
 export default function BuscadorPage() {
-  const isDev = process.env.NODE_ENV !== "production";
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const {
     data,
@@ -107,12 +111,12 @@ export default function BuscadorPage() {
     filters,
     setFilters,
     setPage,
-    totalCount,
     pageSize
   } = useListings({ maxDaysFresh: 15 });
 
   const [minPriceInput, setMinPriceInput] = useState("");
   const [maxPriceInput, setMaxPriceInput] = useState("");
+  const [neighborhoodQuery, setNeighborhoodQuery] = useState("");
 
   const [displayListings, setDisplayListings] = useState<Listing[]>([]);
   const [radarListings, setRadarListings] = useState<RadarListing[]>([]);
@@ -124,37 +128,12 @@ export default function BuscadorPage() {
   const [eventFeed, setEventFeed] = useState<RadarEvent[]>([]);
   const [realtimeHealthy, setRealtimeHealthy] = useState(true);
   const [radarEnabled, setRadarEnabled] = useState(true);
-  const [globeVisible, setGlobeVisible] = useState(true);
-  const [perfSnapshot, setPerfSnapshot] = useState<PerfSnapshot | null>(null);
-  const [debugFlags, setDebugFlags] = useState({
-    disableGlobe: false,
-    disableRealtime: false,
-    disableCards: false,
-    disableLandmask: false
-  });
+  const [lastRadarSyncAt, setLastRadarSyncAt] = useState<number | null>(null);
 
-  const listingIdsRef = useRef<Set<string>>(new Set());
   const filtersRef = useRef(filters);
   const pageRef = useRef(page);
-  const globeRef = useRef<HTMLDivElement | null>(null);
-  const perfRef = useRef({
-    frames: 0,
-    drawMs: 0,
-    staticDraws: 0,
-    staticDrawMs: 0,
-    listUpdates: 0,
-    listUpdateMs: 0,
-    resizeEvents: 0,
-    realtimeEvents: 0,
-    renders: 0,
-    realtimeWindow: Array.from({ length: 60 }, () => 0),
-    realtimeIndex: 0
-  });
-  const perfIntervalRef = useRef<number | null>(null);
   const realtimeQueueRef = useRef<RadarListing[]>([]);
   const realtimeFlushRef = useRef<number | null>(null);
-
-  perfRef.current.renders += 1;
 
   const debouncedNeighborhood = useDebouncedValue(
     filters.neighborhood_normalized ?? "",
@@ -162,87 +141,22 @@ export default function BuscadorPage() {
   );
 
   const emptyState = !loading && displayListings.length === 0;
+  const shouldShowListingsSkeleton = loading && displayListings.length === 0;
 
   useEffect(() => {
     filtersRef.current = filters;
   }, [filters]);
 
   useEffect(() => {
-    if (!globeRef.current || typeof IntersectionObserver === "undefined") {
-      setGlobeVisible(true);
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        setGlobeVisible(entry?.isIntersecting ?? true);
-      },
-      { threshold: 0.15 }
-    );
-    observer.observe(globeRef.current);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[Buscador] radarEnabled:", radarEnabled);
-    }
-  }, [radarEnabled]);
-
-  useEffect(() => {
-    if (!isDev) return;
-    if (perfIntervalRef.current !== null) return;
-    perfIntervalRef.current = window.setInterval(() => {
-      const perf = perfRef.current;
-      const frames = perf.frames;
-      const globeDrawMs = frames ? perf.drawMs / frames : 0;
-      const staticDrawMs = perf.staticDraws
-        ? perf.staticDrawMs / perf.staticDraws
-        : 0;
-      const realtimeWindow = perf.realtimeWindow;
-      realtimeWindow[perf.realtimeIndex] = perf.realtimeEvents;
-      perf.realtimeIndex = (perf.realtimeIndex + 1) % realtimeWindow.length;
-      const realtimeEventsPerMin = realtimeWindow.reduce((sum, value) => sum + value, 0);
-      const listUpdateMs = perf.listUpdates
-        ? perf.listUpdateMs / perf.listUpdates
-        : 0;
-
-      const snapshot: PerfSnapshot = {
-        fps: frames,
-        globeDrawMs,
-        globeFrames: frames,
-        staticDrawMs,
-        staticDraws: perf.staticDraws,
-        listUpdateMs,
-        listUpdates: perf.listUpdates,
-        reactRenders: perf.renders,
-        resizeEvents: perf.resizeEvents,
-        realtimeEventsPerMin,
-        realtimeEvents: perf.realtimeEvents
-      };
-
-      setPerfSnapshot(snapshot);
-      console.log("[Perf]", snapshot);
-
-      perf.frames = 0;
-      perf.drawMs = 0;
-      perf.staticDraws = 0;
-      perf.staticDrawMs = 0;
-      perf.listUpdates = 0;
-      perf.listUpdateMs = 0;
-      perf.resizeEvents = 0;
-      perf.realtimeEvents = 0;
-      perf.renders = 0;
-    }, 1000);
-    return () => {
-      if (perfIntervalRef.current) window.clearInterval(perfIntervalRef.current);
-      perfIntervalRef.current = null;
-    };
-  }, [isDev]);
-
-  useEffect(() => {
     pageRef.current = page;
   }, [page]);
+
+  useEffect(() => {
+    if (radarEnabled) return;
+    setEventFeed([]);
+    setPortalActivity({});
+    setRealtimeHealthy(true);
+  }, [radarEnabled]);
 
   useEffect(() => {
     setMinPriceInput(
@@ -261,16 +175,14 @@ export default function BuscadorPage() {
   }, [filters.maxPrice]);
 
   useEffect(() => {
-    if (debugFlags.disableCards) return;
-    const start = performance.now();
-    setDisplayListings(data);
-    perfRef.current.listUpdates += 1;
-    perfRef.current.listUpdateMs += performance.now() - start;
-  }, [data, debugFlags.disableCards]);
+    if (!filters.neighborhood_normalized) {
+      setNeighborhoodQuery("");
+    }
+  }, [filters.neighborhood_normalized]);
 
   useEffect(() => {
-    listingIdsRef.current = new Set(displayListings.map((item) => item.id));
-  }, [displayListings]);
+    setDisplayListings(data);
+  }, [data]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -282,19 +194,36 @@ export default function BuscadorPage() {
             next[portal] = activity;
           }
         });
-        return next;
+
+        const prevKeys = Object.keys(prev);
+        const nextKeys = Object.keys(next);
+        if (prevKeys.length !== nextKeys.length) {
+          return next;
+        }
+
+        const changed = prevKeys.some((key) => {
+          const prevActivity = prev[key];
+          const nextActivity = next[key];
+          if (!prevActivity || !nextActivity) return true;
+          return (
+            prevActivity.count !== nextActivity.count ||
+            prevActivity.until !== nextActivity.until
+          );
+        });
+
+        return changed ? next : prev;
       });
     }, 500);
+
     return () => clearInterval(interval);
   }, []);
 
-  const totalLabel = useMemo(() => {
-    if (typeof totalCount !== "number") return "--";
-    return totalCount.toString();
-  }, [totalCount]);
-
-
   const fetchRadarData = useCallback(async () => {
+    if (!radarEnabled) {
+      setRadarLoading(false);
+      return;
+    }
+
     setRadarLoading(true);
     setRadarError(null);
 
@@ -320,9 +249,9 @@ export default function BuscadorPage() {
       }
 
       if (debouncedNeighborhood) {
-        const pattern = `%${debouncedNeighborhood.trim()}%`;
-        query = query.or(
-          `neighborhood.ilike.${pattern},neighborhood_normalized.ilike.${pattern}`
+        query = query.like(
+          "neighborhood_normalized",
+          `${debouncedNeighborhood.trim()}%`
         );
       }
 
@@ -352,20 +281,18 @@ export default function BuscadorPage() {
       (item): item is RadarListing =>
         !!item && typeof item === "object" && "id" in item
     );
-    const limited = list.slice(0, 300);
-    setRadarListings(limited);
-    setRadarLoading(false);
 
-    console.info("[Radar] período selecionado:", filters.maxDaysFresh);
-    console.info("[Radar] listings carregados:", limited.length);
-  }, [supabase, filters.maxDaysFresh, filters.portal, debouncedNeighborhood]);
+    setRadarListings(list.slice(0, 300));
+    setLastRadarSyncAt(Date.now());
+    setRadarLoading(false);
+  }, [supabase, filters.maxDaysFresh, filters.portal, debouncedNeighborhood, radarEnabled]);
 
   useEffect(() => {
     fetchRadarData();
-  }, [fetchRadarData, filters.maxDaysFresh]);
+  }, [fetchRadarData, radarEnabled]);
 
   useEffect(() => {
-    if (debugFlags.disableRealtime) {
+    if (!radarEnabled) {
       setRealtimeHealthy(true);
       return;
     }
@@ -384,29 +311,28 @@ export default function BuscadorPage() {
         const timestamp = getListingFirstSeen(listing);
         const timestampDate = parseDateSafe(timestamp);
         if (!timestampDate) return;
+
         const neighborhoodLabel =
           listing.neighborhood ||
           listing.neighborhood_normalized ||
           "Bairro desconhecido";
-        const eventId = `${listingId}-${now}`;
+
         newEvents.push({
-          id: eventId,
-          message: `Novo imóvel em ${neighborhoodLabel} · ${formatRelativeTime(
-            timestampDate
-          )}`,
+          id: `${listingId}-${now}`,
+          message: `Novo imovel em ${neighborhoodLabel} · ${formatRelativeTime(timestampDate)}`,
           at: now
         });
 
         const portalKey = portalBadges.includes(
-          (listing.portal || "").toLowerCase() as (typeof portalBadges)[number]
+          (listing.portal || "").toLowerCase() as PortalBadge
         )
           ? (listing.portal || "").toLowerCase()
           : "outros";
+
         portalCounts[portalKey] = (portalCounts[portalKey] ?? 0) + 1;
       });
 
-      if (!debugFlags.disableCards && pageRef.current === 0) {
-        const start = performance.now();
+      if (pageRef.current === 0) {
         setDisplayListings((prev) => {
           const next = [
             ...queue,
@@ -414,11 +340,8 @@ export default function BuscadorPage() {
           ];
           return next.slice(0, pageSize);
         });
-        perfRef.current.listUpdates += 1;
-        perfRef.current.listUpdateMs += performance.now() - start;
       }
 
-      const radarStart = performance.now();
       setRadarListings((prev) => {
         const next = [
           ...queue,
@@ -426,8 +349,7 @@ export default function BuscadorPage() {
         ];
         return next.slice(0, 300);
       });
-      perfRef.current.listUpdates += 1;
-      perfRef.current.listUpdateMs += performance.now() - radarStart;
+      setLastRadarSyncAt(Date.now());
 
       setPortalActivity((prev) => {
         const next = { ...prev };
@@ -443,17 +365,8 @@ export default function BuscadorPage() {
 
       setEventFeed((prev) => {
         const merged = [...newEvents, ...prev];
-        return merged.slice(0, 5);
+        return merged.slice(0, 6);
       });
-
-      console.info(
-        "[Radar] realtime batch:",
-        queue.map((listing) => ({
-          portal: listing.portal,
-          neighborhood: listing.neighborhood,
-          first_seen_at: listing.first_seen_at
-        }))
-      );
     };
 
     const channel = supabase
@@ -472,21 +385,14 @@ export default function BuscadorPage() {
 
           const currentFilters = filtersRef.current;
           const timestamp = getListingFirstSeen(listing);
-          if (!timestamp) {
-            console.warn("[Radar] listing sem first_seen_at (ignorado):", listing.id);
-            return;
-          }
+          if (!timestamp) return;
 
           const timestampMs = getTimeSafe(timestamp);
-          if (!timestampMs) {
-            console.warn("[Radar] timestamp inválido (ignorado):", listing.id);
-            return;
-          }
+          if (!timestampMs) return;
 
           const isWithinPeriod =
             timestampMs >=
-            Date.now() -
-              currentFilters.maxDaysFresh * 24 * 60 * 60 * 1000;
+            Date.now() - currentFilters.maxDaysFresh * 24 * 60 * 60 * 1000;
 
           if (!isWithinPeriod) return;
 
@@ -498,11 +404,10 @@ export default function BuscadorPage() {
             const pattern = currentFilters.neighborhood_normalized
               .trim()
               .toLowerCase();
-            const candidate =
-              listing.neighborhood_normalized?.toLowerCase() ||
-              listing.neighborhood?.toLowerCase() ||
-              "";
-            if (!candidate.includes(pattern)) return;
+            const candidate = listing.neighborhood_normalized
+              ? listing.neighborhood_normalized.toLowerCase()
+              : normalizeText(listing.neighborhood ?? "");
+            if (!candidate.startsWith(pattern)) return;
           }
 
           if (
@@ -529,10 +434,12 @@ export default function BuscadorPage() {
             return;
           }
 
-          perfRef.current.realtimeEvents += 1;
           realtimeQueueRef.current.push(listing);
           if (realtimeFlushRef.current === null) {
-            realtimeFlushRef.current = window.setTimeout(flushQueue, 300);
+            realtimeFlushRef.current = window.setTimeout(
+              flushQueue,
+              REALTIME_FLUSH_MS
+            );
           }
         }
       )
@@ -542,9 +449,6 @@ export default function BuscadorPage() {
           return;
         }
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          console.warn(
-            "Realtime não habilitado para listings. Habilite em Supabase Dashboard > Replication / Realtime."
-          );
           setRealtimeHealthy(false);
         }
       });
@@ -557,43 +461,18 @@ export default function BuscadorPage() {
       }
       realtimeQueueRef.current = [];
     };
-  }, [supabase, pageSize, debugFlags.disableRealtime, debugFlags.disableCards]);
+  }, [supabase, pageSize, radarEnabled]);
 
   useEffect(() => {
-    if (debugFlags.disableRealtime) return;
+    if (!radarEnabled) return;
     if (realtimeHealthy) return;
+
     const poll = setInterval(() => {
-      console.warn("[Radar] Polling fallback ativo.");
       fetchRadarData();
     }, 60000);
+
     return () => clearInterval(poll);
-  }, [realtimeHealthy, fetchRadarData, debugFlags.disableRealtime]);
-
-  useEffect(() => {
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[Buscador] RadarGlobe2D props", {
-        dimmed: true,
-        className: "globe-card",
-        listings: radarEnabled ? radarListings.length : 0
-      });
-    }
-  }, [radarEnabled, radarListings.length]);
-
-  const handleGlobeDraw = useCallback((ms: number) => {
-    perfRef.current.frames += 1;
-    perfRef.current.drawMs += ms;
-  }, []);
-
-  const handleGlobeStaticDraw = useCallback((ms: number) => {
-    perfRef.current.staticDraws += 1;
-    perfRef.current.staticDrawMs += ms;
-  }, []);
-
-  const handleGlobeResize = useCallback(() => {
-    perfRef.current.resizeEvents += 1;
-  }, []);
-
-  // Globo 2D não depende de clusters; mantemos apenas o feedback textual.
+  }, [realtimeHealthy, fetchRadarData, radarEnabled]);
 
   const new2h = useMemo(() => {
     const now = Date.now();
@@ -619,24 +498,61 @@ export default function BuscadorPage() {
     }).length;
   }, [radarListings]);
 
-  useEffect(() => {
-    console.info("[Radar] cards carregados:", displayListings.length);
-  }, [displayListings.length]);
+  const portalPresence = useMemo<Record<PortalBadge, boolean>>(() => {
+    const presence: Record<PortalBadge, boolean> = {
+      vivareal: false,
+      zap: false,
+      imovelweb: false,
+      outros: false
+    };
+
+    radarListings.forEach((listing) => {
+      const portal = (listing.portal || "").toLowerCase();
+      if (portal === "vivareal" || portal === "zap" || portal === "imovelweb") {
+        presence[portal] = true;
+        return;
+      }
+      presence.outros = true;
+    });
+
+    return presence;
+  }, [radarListings]);
+
+  const activePortalsCount = useMemo(
+    () =>
+      portalBadges.filter(
+        (portal) => portal !== "imovelweb" && portalPresence[portal]
+      ).length,
+    [portalPresence]
+  );
+
+  const opportunities = useMemo(() => {
+    const missingPrice = radarListings.filter(
+      (listing) => typeof listing.price !== "number"
+    ).length;
+    const missingImage = radarListings.filter(
+      (listing) => !listing.main_image_url
+    ).length;
+    const missingNeighborhood = radarListings.filter(
+      (listing) => !listing.neighborhood && !listing.neighborhood_normalized
+    ).length;
+
+    return {
+      missingPrice,
+      missingImage,
+      missingNeighborhood
+    };
+  }, [radarListings]);
+
+  const recentListings = useMemo(() => radarListings.slice(0, 6), [radarListings]);
+
+  const lastSyncLabel = useMemo(() => {
+    if (!lastRadarSyncAt) return "Aguardando primeira sincronizacao";
+    return `Atualizado ${formatRelativeTime(new Date(lastRadarSyncAt))}`;
+  }, [lastRadarSyncAt]);
 
   return (
-    <div className="space-y-8">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold">Radar</h2>
-          <p className="text-sm text-zinc-400">
-            Imóveis frescos detectados nos últimos dias.
-          </p>
-        </div>
-        <div className="text-xs uppercase tracking-[0.35em] text-zinc-500">
-          Total {totalLabel}
-        </div>
-      </div>
-
+    <div className="space-y-6">
       <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
         <Card className="space-y-6">
           <div>
@@ -673,20 +589,28 @@ export default function BuscadorPage() {
           </div>
 
           <div className="grid gap-4">
-            <div className="space-y-2">
-              <label className="text-xs text-zinc-500">
-                Bairro normalizado
-              </label>
-              <Input
-                placeholder="ex: cambuí"
-                value={filters.neighborhood_normalized ?? ""}
-                onChange={(event) =>
-                  setFilters({
-                    neighborhood_normalized: event.target.value || ""
-                  })
-                }
-              />
-            </div>
+            <NeighborhoodAutocomplete
+              label="Bairro"
+              placeholder="Digite o bairro"
+              city="Campinas"
+              value={neighborhoodQuery}
+              onChange={(nextValue) => {
+                setNeighborhoodQuery(nextValue);
+                setFilters({
+                  neighborhood_normalized: normalizeText(nextValue)
+                });
+              }}
+              onSelect={(item) => {
+                setNeighborhoodQuery(item.name);
+                setFilters({
+                  neighborhood_normalized: item.name_normalized
+                });
+              }}
+              onClear={() => {
+                setNeighborhoodQuery("");
+                setFilters({ neighborhood_normalized: "" });
+              }}
+            />
 
             <div className="space-y-2">
               <label className="text-xs text-zinc-500">Portal</label>
@@ -733,7 +657,7 @@ export default function BuscadorPage() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-xs text-zinc-500">Preço mín.</label>
+                <label className="text-xs text-zinc-500">Preco min.</label>
                 <Input
                   type="text"
                   placeholder="100.000"
@@ -748,8 +672,9 @@ export default function BuscadorPage() {
                   }}
                 />
               </div>
+
               <div className="space-y-2">
-                <label className="text-xs text-zinc-500">Preço máx.</label>
+                <label className="text-xs text-zinc-500">Preco max.</label>
                 <Input
                   type="text"
                   placeholder="900.000"
@@ -767,7 +692,7 @@ export default function BuscadorPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs text-zinc-500">Quartos mín.</label>
+              <label className="text-xs text-zinc-500">Quartos min.</label>
               <Input
                 type="number"
                 placeholder="2"
@@ -786,7 +711,8 @@ export default function BuscadorPage() {
           <Button
             variant="ghost"
             className="h-8 px-3 text-xs uppercase tracking-[0.3em]"
-            onClick={() =>
+            onClick={() => {
+              setNeighborhoodQuery("");
               setFilters({
                 maxDaysFresh: 15,
                 neighborhood_normalized: "",
@@ -795,234 +721,117 @@ export default function BuscadorPage() {
                 minBedrooms: undefined,
                 portal: "",
                 sort: "date_desc"
-              })
-            }
+              });
+            }}
           >
             Limpar
           </Button>
         </Card>
 
-        <div className="relative">
-          <div className="relative z-20 space-y-6">
-            <Card className="relative space-y-4 overflow-hidden bg-black/60 backdrop-blur-md">
-              <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] lg:items-start">
-                <div className="space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <p className="text-[10px] uppercase tracking-[0.4em] text-zinc-500">
-                        Radar ativo
-                      </p>
-                      <h3 className="mt-2 text-lg font-semibold">
-                        Campinas · {filters.maxDaysFresh} dias
-                      </h3>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="ghost"
-                        className="h-8 px-3 text-xs uppercase tracking-[0.3em]"
-                        onClick={() => setRadarEnabled((prev) => !prev)}
-                      >
-                        Radar: {radarEnabled ? "on" : "off"}
-                      </Button>
-                    </div>
-                  </div>
+        <div className="space-y-6">
+          <Card className="bg-black/60 px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2 md:gap-3">
+              <span className="rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-100">
+                Novos 2h: {new2h}
+              </span>
+              <span className="rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-100">
+                Novos 24h: {new24h}
+              </span>
 
-                  <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
-                    <span className="rounded-full border border-zinc-800 bg-black/60 px-3 py-1">
-                      Novos 2h: {new2h}
-                    </span>
-                    <span className="rounded-full border border-zinc-800 bg-black/60 px-3 py-1">
-                      Novos 24h: {new24h}
-                    </span>
-                    {radarLoading ? (
-                      <span className="text-zinc-500">Carregando radar...</span>
-                    ) : null}
-                  </div>
+              <div className="flex basis-full flex-wrap items-center gap-2 sm:ml-auto sm:basis-auto">
+                {portalBadges.map((portal) => {
+                  const isImovelweb = portal === "imovelweb";
+                  const isActive = !isImovelweb && radarEnabled && portalPresence[portal];
+                  const filterValue = portalFilterByBadge[portal];
+                  const isDisabled = isImovelweb;
+                  const isSelected = (filters.portal ?? "") === filterValue;
 
-                  <div className="flex flex-wrap gap-2">
-                    {portalBadges.map((portal) => {
-                      const active = portalActivity[portal];
-                      const isGlowing = active && active.until > Date.now();
-                      return (
-                        <div
-                          key={portal}
-                          className={`flex items-center gap-2 rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.3em] ${
-                            isGlowing
-                              ? "border-white/60 bg-white/10 text-white shadow-[0_0_16px_rgba(255,255,255,0.4)] animate-pulse"
-                              : "border-zinc-800 bg-black/60 text-zinc-400"
-                          }`}
-                        >
-                          <span>{portal}</span>
-                          {active?.count ? (
-                            <span className="rounded-full border border-white/20 px-1.5 py-0.5 text-[9px] text-white/80">
-                              +{active.count}
-                            </span>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {radarError ? (
-                    <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                      {radarError}
-                    </p>
-                  ) : null}
-
-                  <div className="space-y-1 text-xs text-zinc-500">
-                    {eventFeed.length === 0 ? (
-                      <span>Eventos em tempo real aparecerão aqui.</span>
-                    ) : (
-                      eventFeed.map((event) => (
-                        <span key={event.id} className="block">
-                          {event.message}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div
-                  ref={globeRef}
-                  className="relative h-[260px] overflow-hidden rounded-2xl border border-zinc-800 bg-black/70 md:h-[320px]"
-                  style={{ touchAction: "none" }}
-                >
-                  {debugFlags.disableGlobe ? (
-                    <div className="flex h-full items-center justify-center text-xs uppercase tracking-[0.3em] text-zinc-500">
-                      Globo OFF (debug)
-                    </div>
-                  ) : (
-                    <RadarGlobe2D
-                      visible={globeVisible && radarEnabled}
-                      useLandmask={!debugFlags.disableLandmask}
-                      onDrawFrame={handleGlobeDraw}
-                      onStaticDraw={handleGlobeStaticDraw}
-                      onResize={handleGlobeResize}
-                    />
-                  )}
-                </div>
-              </div>
-            </Card>
-
-            {!debugFlags.disableRealtime && !realtimeHealthy ? (
-              <Card className="border-yellow-500/40 bg-yellow-500/10 text-yellow-200 text-sm">
-                Realtime desativado. Radar continua mostrando histórico via
-                fetch; eventos ao vivo dependem de habilitar Realtime para
-                public.listings (Database → Replication → Realtime).
-              </Card>
-            ) : null}
-
-            {error ? (
-              <Card className="border-red-500/40 bg-red-500/10 text-red-200">
-                {error}
-              </Card>
-            ) : null}
-
-            {debugFlags.disableCards ? (
-              <Card className="text-center text-sm text-zinc-500">
-                Lista de cards desligada (debug).
-              </Card>
-            ) : emptyState ? (
-              <Card className="text-center">
-                <p className="text-lg font-semibold">Sem resultados</p>
-                <p className="mt-2 text-sm text-zinc-400">
-                  Ajuste os filtros ou aguarde novos listings entrarem.
-                </p>
-              </Card>
-            ) : (
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                <AnimatePresence mode="popLayout">
-                  {displayListings.map((listing, index) => (
-                    <ListingCard
-                      key={listing.id ?? `${index}`}
-                      listing={listing}
-                      index={index}
-                    />
-                  ))}
-                </AnimatePresence>
-              </div>
-            )}
-
-            <div className="flex items-center justify-between text-sm text-zinc-500">
-              <span>Mostrando página {page + 1}</span>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  onClick={() => setPage(Math.max(0, page - 1))}
-                  disabled={page === 0 || loading}
-                >
-                  Anterior
-                </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() => setPage(page + 1)}
-                  disabled={!hasNextPage || loading}
-                >
-                  Próxima
-                </Button>
+                  return (
+                    <button
+                      key={portal}
+                      type="button"
+                      disabled={isDisabled}
+                      aria-disabled={isDisabled}
+                      aria-pressed={!isDisabled ? isSelected : undefined}
+                      onClick={() => {
+                        if (isDisabled) return;
+                        setFilters({ portal: filterValue });
+                        setPage(0);
+                      }}
+                      className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-black ${
+                        isDisabled
+                          ? "cursor-not-allowed border-zinc-800 bg-zinc-900/60 text-zinc-600"
+                          : isActive
+                          ? "border-emerald-500/70 bg-emerald-500/10 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)]"
+                          : "border-zinc-700 bg-zinc-900/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                      } ${
+                        isSelected && !isDisabled
+                          ? "ring-1 ring-emerald-400/60"
+                          : ""
+                      }`}
+                    >
+                      {portal.toUpperCase()}
+                    </button>
+                  );
+                })}
               </div>
             </div>
+          </Card>
 
-            {isDev ? (
-              <Card className="space-y-4 border-white/10 bg-black/50 text-xs text-zinc-400">
-                <div className="flex flex-wrap items-center gap-4">
-                  <span className="text-[10px] uppercase tracking-[0.4em] text-zinc-500">
-                    Perf overlay
-                  </span>
-                  <span>FPS: {perfSnapshot?.fps ?? "--"}</span>
-                  <span>
-                    Draw ms: {perfSnapshot ? perfSnapshot.globeDrawMs.toFixed(2) : "--"}
-                  </span>
-                  <span>
-                    Static draw ms: {" "}
-                    {perfSnapshot ? perfSnapshot.staticDrawMs.toFixed(2) : "--"}
-                  </span>
-                  <span>Static draws/s: {perfSnapshot?.staticDraws ?? "--"}</span>
-                  <span>
-                    List update ms: {" "}
-                    {perfSnapshot ? perfSnapshot.listUpdateMs.toFixed(2) : "--"}
-                  </span>
-                  <span>List updates/s: {perfSnapshot?.listUpdates ?? "--"}</span>
-                  <span>Renders/s: {perfSnapshot?.reactRenders ?? "--"}</span>
-                  <span>Resize/s: {perfSnapshot?.resizeEvents ?? "--"}</span>
-                  <span>
-                    Realtime/min: {perfSnapshot?.realtimeEventsPerMin ?? "--"}
-                  </span>
-                  <span>
-                    Realtime/s: {perfSnapshot?.realtimeEvents ?? "--"}
-                  </span>
-                </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          </div>
 
-                <div className="flex flex-wrap gap-3">
-                  {(
-                    [
-                      ["disableGlobe", "Desligar globo"],
-                      ["disableRealtime", "Desligar realtime"],
-                      ["disableCards", "Desligar cards"],
-                      ["disableLandmask", "Desligar landmask"]
-                    ] as const
-                  ).map(([key, label]) => (
-                    <label
-                      key={key}
-                      className="flex items-center gap-2 rounded-full border border-zinc-800 px-3 py-1 text-[10px] uppercase tracking-[0.25em]"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={debugFlags[key]}
-                        onChange={(event) =>
-                          setDebugFlags((prev) => ({
-                            ...prev,
-                            [key]: event.target.checked
-                          }))
-                        }
-                        className="h-3 w-3 accent-white"
-                      />
-                      {label}
-                    </label>
-                  ))}
-                </div>
-              </Card>
-            ) : null}
+          {radarError ? (
+            <Card className="border-red-500/40 bg-red-500/10 text-sm text-red-200">
+              {radarError}
+            </Card>
+          ) : null}
+
+          {!realtimeHealthy ? (
+            <Card className="border-yellow-500/40 bg-yellow-500/10 text-sm text-yellow-200">
+              Realtime desativado. O radar continua com polling a cada 60 segundos.
+            </Card>
+          ) : null}
+
+          {error ? (
+            <Card className="border-red-500/40 bg-red-500/10 text-red-200">
+              {error}
+            </Card>
+          ) : null}
+
+          {emptyState ? (
+            <Card className="text-center">
+              <p className="text-lg font-semibold">Sem resultados</p>
+              <p className="mt-2 text-sm text-zinc-400">
+                Ajuste os filtros ou aguarde novos listings entrarem.
+              </p>
+            </Card>
+          ) : shouldShowListingsSkeleton ? (
+            <SkeletonList />
+          ) : (
+            <Suspense fallback={<SkeletonList />}>
+              <LazyRadarListingsGrid listings={displayListings} />
+            </Suspense>
+          )}
+
+          <div className="flex items-center justify-between text-sm text-zinc-500">
+            <span>Mostrando pagina {page + 1}</span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => setPage(Math.max(0, page - 1))}
+                disabled={page === 0 || loading}
+              >
+                Anterior
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => setPage(page + 1)}
+                disabled={!hasNextPage || loading}
+              >
+                Proxima
+              </Button>
+            </div>
           </div>
         </div>
       </div>

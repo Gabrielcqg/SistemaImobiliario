@@ -4,6 +4,7 @@ import { memo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Button from "@/components/ui/Button";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { dispatchNavigationStart } from "@/lib/navigation/progress";
 
 function Topbar() {
   const router = useRouter();
@@ -13,6 +14,7 @@ function Topbar() {
     setLoading(true);
     const supabase = createSupabaseBrowserClient();
     await supabase.auth.signOut();
+    dispatchNavigationStart();
     router.replace("/login");
     router.refresh();
     setLoading(false);

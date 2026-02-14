@@ -1,6 +1,11 @@
 "use client";
 
-import { motion, useMotionValue, useTransform } from "framer-motion";
+import {
+  motion,
+  useMotionValue,
+  useReducedMotion,
+  useTransform
+} from "framer-motion";
 import { useMemo } from "react";
 import type { MouseEvent } from "react";
 import type { Listing } from "@/hooks/useListings";
@@ -26,16 +31,17 @@ const formatDate = (value: string | null) => {
 
 type ListingCardProps = {
   listing: Listing;
-  index: number;
 };
 
-export default function ListingCard({ listing, index }: ListingCardProps) {
+export default function ListingCard({ listing }: ListingCardProps) {
+  const shouldReduceMotion = useReducedMotion();
   const x = useMotionValue(0);
   const y = useMotionValue(0);
   const rotateX = useTransform(y, [-50, 50], [8, -8]);
   const rotateY = useTransform(x, [-50, 50], [-8, 8]);
 
   const handleMouseMove = (event: MouseEvent<HTMLDivElement>) => {
+    if (shouldReduceMotion) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const offsetX = event.clientX - rect.left - rect.width / 2;
     const offsetY = event.clientY - rect.top - rect.height / 2;
@@ -44,6 +50,7 @@ export default function ListingCard({ listing, index }: ListingCardProps) {
   };
 
   const handleMouseLeave = () => {
+    if (shouldReduceMotion) return;
     x.set(0);
     y.set(0);
   };
@@ -95,31 +102,21 @@ export default function ListingCard({ listing, index }: ListingCardProps) {
 
   return (
     <motion.div
-      layout
-      custom={index}
-      initial={{ opacity: 0, y: 18, scale: 0.98 }}
-      animate={{
-        opacity: 1,
-        y: 0,
-        scale: 1,
-        transition: {
-          type: "spring",
-          stiffness: 140,
-          damping: 18,
-          delay: index * 0.03
-        }
-      }}
-      exit={{ opacity: 0, y: -10, scale: 0.97 }}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
-      style={{ rotateX, rotateY, transformStyle: "preserve-3d" }}
-      className="relative rounded-2xl border border-zinc-800 bg-white/5 p-5 shadow-glow backdrop-blur-md will-change-transform"
-      whileHover={{ scale: 1.02 }}
+      style={
+        shouldReduceMotion
+          ? undefined
+          : { rotateX, rotateY, transformStyle: "preserve-3d" }
+      }
+      className="relative rounded-2xl border border-zinc-800 bg-white/5 p-5 shadow-glow backdrop-blur-md transition-colors duration-150 focus-within:border-white/40"
+      whileHover={shouldReduceMotion ? undefined : { scale: 1.01 }}
+      transition={{ duration: 0.15, ease: "easeOut" }}
     >
       {isNew24h ? (
-      <span className="pointer-events-none absolute right-3 top-1 z-10 rounded-full border border-white/30 bg-white/10 px-2 py-1.0 text-[9px] uppercase tracking-[0.4em] text-white">
-        Novo
-      </span>
+        <span className="pointer-events-none absolute right-3 top-1 z-10 rounded-full border border-white/30 bg-white/10 px-2 py-1 text-[9px] uppercase tracking-[0.4em] text-white">
+          Novo
+        </span>
       ) : null}
       <div className="flex items-center justify-between text-xs text-zinc-500">
         <div className="flex items-center gap-2">

@@ -1,14 +1,20 @@
+import SkeletonCard from "@/components/ui/SkeletonCard";
+import SkeletonList from "@/components/ui/SkeletonList";
+
 export default function BuscadorLoading() {
   return (
     <div className="space-y-6">
-      <div className="h-6 w-48 rounded bg-white/10 animate-pulse" />
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 6 }).map((_, index) => (
-          <div
-            key={index}
-            className="h-56 rounded-2xl border border-zinc-800 bg-white/5 animate-pulse"
-          />
-        ))}
+      <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
+        <SkeletonCard className="h-[560px]" />
+        <div className="space-y-6">
+          <SkeletonCard className="h-14" />
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <SkeletonCard className="h-60 md:col-span-2 xl:col-span-2" />
+            <SkeletonCard className="h-60" />
+            <SkeletonCard className="h-60" />
+          </div>
+          <SkeletonList />
+        </div>
       </div>
     </div>
   );
