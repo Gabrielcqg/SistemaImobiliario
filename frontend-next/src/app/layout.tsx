@@ -19,9 +19,18 @@ const spaceMono = Space_Mono({
 export const metadata: Metadata = {
   title: {
     default: "HomeRadar",
-    template: "%s • HomeRadar",
+    template: "%s • HomeRadar"
   },
-  description: "Modern real-estate search and lead radar."
+  description: "Modern real-estate search and lead radar.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico" },
+      { url: "/icon-32.png", type: "image/png", sizes: "32x32" },
+      { url: "/icon.svg", type: "image/svg+xml" }
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
+    shortcut: ["/favicon.ico"]
+  }
 };
 
 
