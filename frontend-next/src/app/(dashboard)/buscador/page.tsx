@@ -82,6 +82,8 @@ type RadarEvent = {
 };
 
 const REALTIME_FLUSH_MS = 400;
+const GENERAL_LIST_POLL_MS = 300000;
+const AUTO_REFRESH_FEEDBACK_MS = 5000;
 
 function useDebouncedValue<T>(value: T, delayMs: number) {
   const [debounced, setDebounced] = useState(value);
@@ -148,7 +150,8 @@ export default function BuscadorPage() {
     filters,
     setFilters,
     setPage,
-    pageSize
+    pageSize,
+    refetch
   } = useListings({ maxDaysFresh: 15 });
 
   const [minPriceInput, setMinPriceInput] = useState("");
@@ -165,6 +168,9 @@ export default function BuscadorPage() {
   const [eventFeed, setEventFeed] = useState<RadarEvent[]>([]);
   const [realtimeHealthy, setRealtimeHealthy] = useState(true);
   const [radarEnabled, setRadarEnabled] = useState(true);
+  const [autoRefreshFeedback, setAutoRefreshFeedback] = useState<string | null>(
+    null
+  );
   const [, setLastRadarSyncAt] = useState<number | null>(null);
 
   const filtersRef = useRef(filters);
@@ -173,11 +179,46 @@ export default function BuscadorPage() {
   const pendingPaginationScrollRef = useRef(false);
   const realtimeQueueRef = useRef<RadarListing[]>([]);
   const realtimeFlushRef = useRef<number | null>(null);
+  const lastSignalTsRef = useRef<string | null>(null);
+  const lastSignalIdRef = useRef<string | null>(null);
+  const currentListingIdsRef = useRef<Set<string>>(new Set());
+  const pendingGeneralRefreshIdsRef = useRef<Set<string> | null>(null);
+  const autoRefreshFeedbackTimerRef = useRef<number | null>(null);
 
   const debouncedNeighborhood = useDebouncedValue(
     filters.neighborhood_normalized ?? "",
     400
   );
+  const isGeneralListMode = useMemo(() => {
+    const neighborhoodFilter = (filters.neighborhood_normalized ?? "").trim();
+    const portalFilter = (filters.portal ?? "").trim();
+    const sortValue = filters.sort ?? "date_desc";
+    return (
+      filters.maxDaysFresh === 15 &&
+      sortValue === "date_desc" &&
+      !portalFilter &&
+      !neighborhoodFilter &&
+      typeof filters.minPrice !== "number" &&
+      typeof filters.maxPrice !== "number" &&
+      typeof filters.minBedrooms !== "number" &&
+      typeof filters.minBathrooms !== "number" &&
+      typeof filters.minParking !== "number" &&
+      typeof filters.minAreaM2 !== "number" &&
+      !filters.propertyType
+    );
+  }, [
+    filters.minAreaM2,
+    filters.minBathrooms,
+    filters.minBedrooms,
+    filters.minParking,
+    filters.maxDaysFresh,
+    filters.maxPrice,
+    filters.minPrice,
+    filters.neighborhood_normalized,
+    filters.portal,
+    filters.propertyType,
+    filters.sort
+  ]);
 
   const emptyState = !loading && displayListings.length === 0;
   const shouldShowListingsSkeleton = loading && displayListings.length === 0;
@@ -243,6 +284,176 @@ export default function BuscadorPage() {
   useEffect(() => {
     setDisplayListings(data);
   }, [data]);
+
+  useEffect(() => {
+    currentListingIdsRef.current = new Set(data.map((listing) => listing.id));
+  }, [data]);
+
+  const showAutoRefreshFeedback = useCallback((message: string) => {
+    setAutoRefreshFeedback(message);
+    if (autoRefreshFeedbackTimerRef.current !== null) {
+      window.clearTimeout(autoRefreshFeedbackTimerRef.current);
+    }
+    autoRefreshFeedbackTimerRef.current = window.setTimeout(() => {
+      setAutoRefreshFeedback(null);
+      autoRefreshFeedbackTimerRef.current = null;
+    }, AUTO_REFRESH_FEEDBACK_MS);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (autoRefreshFeedbackTimerRef.current !== null) {
+        window.clearTimeout(autoRefreshFeedbackTimerRef.current);
+      }
+    };
+  }, []);
+
+  const fetchLatestSignal = useCallback(async () => {
+    const createdSignal = await supabase
+      .from("listings")
+      .select("id, created_at")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!createdSignal.error) {
+      const row = createdSignal.data as
+        | { id?: string | null; created_at?: string | null }
+        | null;
+      return {
+        id: row?.id ?? null,
+        ts: row?.created_at ?? null
+      };
+    }
+
+    const missingCreatedAt = /created_at|does not exist|PGRST204/i.test(
+      createdSignal.error.message ?? ""
+    );
+    if (!missingCreatedAt) {
+      if (process.env.NODE_ENV === "development") {
+        console.error("[general-polling] latest signal error", createdSignal.error);
+      }
+      return { id: null, ts: null };
+    }
+
+    const firstSeenSignal = await supabase
+      .from("listings")
+      .select("id, first_seen_at")
+      .order("first_seen_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (firstSeenSignal.error) {
+      if (process.env.NODE_ENV === "development") {
+        console.error(
+          "[general-polling] fallback first_seen_at signal error",
+          firstSeenSignal.error
+        );
+      }
+      return { id: null, ts: null };
+    }
+
+    const row = firstSeenSignal.data as
+      | { id?: string | null; first_seen_at?: string | null }
+      | null;
+
+    return {
+      id: row?.id ?? null,
+      ts: row?.first_seen_at ?? null
+    };
+  }, [supabase]);
+
+  useEffect(() => {
+    if (!isGeneralListMode) {
+      pendingGeneralRefreshIdsRef.current = null;
+      lastSignalTsRef.current = null;
+      lastSignalIdRef.current = null;
+      setAutoRefreshFeedback(null);
+      return;
+    }
+
+    let stopped = false;
+    let intervalId: number | null = null;
+
+    const clearIntervalIfNeeded = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    const checkLatestSignal = async () => {
+      if (stopped || document.visibilityState === "hidden") return;
+
+      const latest = await fetchLatestSignal();
+      if (stopped || !latest.id) return;
+
+      const latestSignal = latest.ts ?? latest.id;
+      const currentSignal = lastSignalTsRef.current ?? lastSignalIdRef.current;
+
+      if (!latestSignal) return;
+
+      if (!currentSignal) {
+        lastSignalTsRef.current = latest.ts;
+        lastSignalIdRef.current = latest.id;
+        return;
+      }
+
+      if (currentSignal === latestSignal) return;
+
+      lastSignalTsRef.current = latest.ts;
+      lastSignalIdRef.current = latest.id;
+      pendingGeneralRefreshIdsRef.current = new Set(currentListingIdsRef.current);
+      refetch();
+    };
+
+    const startPolling = () => {
+      if (intervalId !== null) return;
+      intervalId = window.setInterval(() => {
+        void checkLatestSignal();
+      }, GENERAL_LIST_POLL_MS);
+    };
+
+    void checkLatestSignal();
+    startPolling();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        clearIntervalIfNeeded();
+        return;
+      }
+      void checkLatestSignal();
+      startPolling();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      stopped = true;
+      clearIntervalIfNeeded();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [fetchLatestSignal, isGeneralListMode, refetch]);
+
+  useEffect(() => {
+    if (!pendingGeneralRefreshIdsRef.current) return;
+    if (loading || error) return;
+
+    const previousIds = pendingGeneralRefreshIdsRef.current;
+    const currentIds = new Set(data.map((listing) => listing.id));
+    let newCount = 0;
+
+    currentIds.forEach((id) => {
+      if (!previousIds.has(id)) {
+        newCount += 1;
+      }
+    });
+
+    pendingGeneralRefreshIdsRef.current = null;
+    showAutoRefreshFeedback(
+      newCount > 0 ? `+${newCount} novos imoveis` : "Nada novo"
+    );
+  }, [data, error, loading, showAutoRefreshFeedback]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -953,6 +1164,16 @@ export default function BuscadorPage() {
           {!realtimeHealthy ? (
             <Card className="border-yellow-500/40 bg-yellow-500/10 text-sm text-yellow-200">
               Realtime desativado. O radar continua com polling a cada 60 segundos.
+            </Card>
+          ) : null}
+
+          {autoRefreshFeedback ? (
+            <Card
+              role="status"
+              aria-live="polite"
+              className="border-emerald-500/40 bg-emerald-500/10 text-sm text-emerald-200"
+            >
+              {autoRefreshFeedback}
             </Card>
           ) : null}
 

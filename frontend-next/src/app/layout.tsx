@@ -17,9 +17,13 @@ const spaceMono = Space_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Projeto Imobiliária",
-  description: "Frontend moderno para o projeto imobiliário"
+  title: {
+    default: "HomeRadar",
+    template: "%s • HomeRadar",
+  },
+  description: "Modern real-estate search and lead radar."
 };
+
 
 export default function RootLayout({
   children

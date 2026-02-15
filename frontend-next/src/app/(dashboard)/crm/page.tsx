@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import Image from "next/image";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
@@ -60,6 +61,16 @@ type Match = {
   listing?: Listing | null;
   _isRealtime?: boolean;
   _isNew?: boolean;
+};
+
+type ListingRuleFn = (
+  listing?: Listing | null,
+  override?: ClientFilter | null
+) => boolean;
+
+type ListingRules = {
+  isWithinPriceRange: ListingRuleFn;
+  isWithinListingRules: ListingRuleFn;
 };
 
 const LAST_VIEWED_KEY = "crm:lastViewedAtByClient";
@@ -244,10 +255,36 @@ export default function CrmPage() {
   const processingQueueRef = useRef(false);
   const lastViewedAtRef = useRef<Record<string, string>>({});
   const matchIdsRef = useRef<Set<string>>(new Set());
-  const listingRulesRef = useRef({
-    isWithinPriceRange: (_listing?: Listing | null) => true,
-    isWithinListingRules: (_listing?: Listing | null) => true
-  });
+  const fetchClientsRef = useRef<(nextSelectedId?: string) => Promise<void>>(
+    async () => {}
+  );
+  const fetchClientAlertsRef = useRef<() => Promise<void>>(async () => {});
+  const fetchFilterRef = useRef<(clientId: string) => Promise<ClientFilter | null>>(
+    async () => null
+  );
+  const fetchMatchesRef = useRef<
+    (
+      clientId: string,
+      page: number,
+      filterOverride?: ClientFilter | null
+    ) => Promise<void>
+  >(async () => {});
+  const fetchHistoryRef = useRef<
+    (
+      clientId: string,
+      page: number,
+      filterOverride?: ClientFilter | null
+    ) => Promise<void>
+  >(async () => {});
+  const fetchArchivedRef = useRef<
+    (
+      clientId: string,
+      page: number,
+      filterOverride?: ClientFilter | null
+    ) => Promise<void>
+  >(async () => {});
+  const acknowledgeClientViewRef = useRef<(clientId: string) => void>(() => {});
+  const listingRulesRef = useRef<ListingRules | null>(null);
 
   const selectedClient =
     clients.find((client) => client.id === selectedClientId) ?? null;
@@ -376,7 +413,7 @@ export default function CrmPage() {
   const isWithinPriceRange = (
     listing?: Listing | null,
     override?: ClientFilter | null
-  ) => {
+  ): boolean => {
     const { min, max } = getPriceRange(override);
     if (typeof min !== "number" || typeof max !== "number") return true;
     const price = listing?.price;
@@ -396,7 +433,7 @@ export default function CrmPage() {
   const isWithinListingRules = (
     listing?: Listing | null,
     override?: ClientFilter | null
-  ) => {
+  ): boolean => {
     if (!listing) return true;
 
     const { minBedrooms, minBathrooms, minParking, minAreaM2, propertyTypes } =
@@ -459,6 +496,7 @@ export default function CrmPage() {
     });
     setClientAlerts(counts);
   };
+  fetchClientAlertsRef.current = fetchClientAlerts;
 
   const acknowledgeClientView = (clientId: string) => {
     const now = new Date().toISOString();
@@ -477,6 +515,7 @@ export default function CrmPage() {
       return next;
     });
   };
+  acknowledgeClientViewRef.current = acknowledgeClientView;
 
   const enrichMatchesWithListings = async (
     rows: Match[],
@@ -590,6 +629,7 @@ export default function CrmPage() {
       resetDraftFromClient(sorted[0]);
     }
   };
+  fetchClientsRef.current = fetchClients;
 
   const handlePipelineChange = async (nextStatus: string) => {
     if (!selectedClientId) {
@@ -624,28 +664,30 @@ export default function CrmPage() {
     const selectBaseColumns =
       "id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, max_days_fresh, property_types";
 
-    let { data, error } = await supabase
+    const primary = await supabase
       .from("client_filters")
       .select(selectWithExtendedColumns)
       .eq("client_id", clientId)
       .maybeSingle();
+    let filterData = (primary.data as ClientFilter | null) ?? null;
+    let filterError = primary.error;
 
-    if (error && isMissingColumnError(error.message)) {
+    if (filterError && isMissingColumnError(filterError.message)) {
       const fallback = await supabase
         .from("client_filters")
         .select(selectBaseColumns)
         .eq("client_id", clientId)
         .maybeSingle();
-      data = fallback.data;
-      error = fallback.error;
+      filterData = (fallback.data as ClientFilter | null) ?? null;
+      filterError = fallback.error;
     }
 
-    if (error) {
-      setFilterError(error.message);
+    if (filterError) {
+      setFilterError(filterError.message);
       return null;
     }
 
-    const filter = data as ClientFilter | null;
+    const filter = filterData;
 
     setFilterDraft({
       active: filter?.active ?? true,
@@ -675,6 +717,7 @@ export default function CrmPage() {
 
     return filter;
   };
+  fetchFilterRef.current = fetchFilter;
 
   const fetchMatches = async (
     clientId: string,
@@ -709,6 +752,7 @@ export default function CrmPage() {
 
     setMatchesLoading(false);
   };
+  fetchMatchesRef.current = fetchMatches;
 
   const fetchHistory = async (
     clientId: string,
@@ -744,6 +788,7 @@ export default function CrmPage() {
 
     setHistoryLoading(false);
   };
+  fetchHistoryRef.current = fetchHistory;
 
   const fetchArchived = async (
     clientId: string,
@@ -779,18 +824,19 @@ export default function CrmPage() {
 
     setArchivedLoading(false);
   };
+  fetchArchivedRef.current = fetchArchived;
 
   useEffect(() => {
     setLastViewedAtByClient(loadLastViewedMap());
   }, []);
 
   useEffect(() => {
-    fetchClients();
+    fetchClientsRef.current();
   }, []);
 
   useEffect(() => {
     lastViewedAtRef.current = lastViewedAtByClient;
-    fetchClientAlerts();
+    fetchClientAlertsRef.current();
   }, [lastViewedAtByClient]);
 
   useEffect(() => {
@@ -810,14 +856,14 @@ export default function CrmPage() {
     let cancelled = false;
 
     const loadClientData = async () => {
-      const filter = await fetchFilter(selectedClientId);
+      const filter = await fetchFilterRef.current(selectedClientId);
       await Promise.all([
-        fetchMatches(selectedClientId, 0, filter),
-        fetchHistory(selectedClientId, 0, filter),
-        fetchArchived(selectedClientId, 0, filter)
+        fetchMatchesRef.current(selectedClientId, 0, filter),
+        fetchHistoryRef.current(selectedClientId, 0, filter),
+        fetchArchivedRef.current(selectedClientId, 0, filter)
       ]);
       if (!cancelled) {
-        acknowledgeClientView(selectedClientId);
+        acknowledgeClientViewRef.current(selectedClientId);
       }
     };
 
@@ -865,9 +911,12 @@ export default function CrmPage() {
             listing: (listing as Listing | null) ?? null
           };
 
+          const rules = listingRulesRef.current;
+          if (!rules) return;
+
           if (
-            !listingRulesRef.current.isWithinPriceRange(enriched.listing) ||
-            !listingRulesRef.current.isWithinListingRules(enriched.listing)
+            !rules.isWithinPriceRange(enriched.listing) ||
+            !rules.isWithinListingRules(enriched.listing)
           ) {
             return;
           }
@@ -1684,12 +1733,14 @@ export default function CrmPage() {
                             </div>
                           </div>
 
-                          <div className="h-[280px] overflow-hidden rounded-xl border border-zinc-800 bg-black/50">
+                          <div className="relative h-[280px] overflow-hidden rounded-xl border border-zinc-800 bg-black/50">
                             {listing?.main_image_url ? (
-                              <img
+                              <Image
                                 src={listing.main_image_url}
                                 alt={title}
-                                className="h-full w-full object-cover"
+                                fill
+                                sizes="(max-width: 768px) 100vw, (max-width: 1280px) 60vw, 40vw"
+                                className="object-cover"
                               />
                             ) : (
                               <div className="flex h-full items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">

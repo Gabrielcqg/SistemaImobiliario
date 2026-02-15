@@ -50,6 +50,7 @@ type UseListingsResult = {
   filters: ListingsFilters;
   setFilters: (next: Partial<ListingsFilters>) => void;
   setPage: (next: number) => void;
+  refetch: () => void;
 };
 
 function useDebouncedValue<T>(value: T, delayMs: number) {
@@ -81,6 +82,7 @@ export function useListings(
   const [totalCount, setTotalCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
   const pageSize = 12;
 
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
@@ -89,6 +91,10 @@ export function useListings(
   const setFilters = useCallback((next: Partial<ListingsFilters>) => {
     setFiltersState((prev) => ({ ...prev, ...next }));
     setPage(0);
+  }, []);
+
+  const refetch = useCallback(() => {
+    setRefreshTick((prev) => prev + 1);
   }, []);
 
   useEffect(() => {
@@ -191,7 +197,7 @@ export function useListings(
       isActive = false;
       if (timeoutId) window.clearTimeout(timeoutId);
     };
-  }, [debouncedFilters, page, pageSize, supabase]);
+  }, [debouncedFilters, page, pageSize, supabase, refreshTick]);
 
   const hasNextPage =
     totalCount !== null ? (page + 1) * pageSize < totalCount : false;
@@ -206,6 +212,7 @@ export function useListings(
     hasNextPage,
     filters,
     setFilters,
-    setPage
+    setPage,
+    refetch
   };
 }

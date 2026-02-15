@@ -97,9 +97,9 @@ export default function SignupForm({ onSwitchMode }: SignupFormProps) {
     event.preventDefault();
 
     const nextErrors: SignupFieldErrors = {
-      name: validateFullName(name),
-      email: validateEmail(email),
-      password: validatePassword(password)
+      name: validateFullName(name) ?? undefined,
+      email: validateEmail(email) ?? undefined,
+      password: validatePassword(password) ?? undefined
     };
 
     const hasErrors = Object.values(nextErrors).some(Boolean);

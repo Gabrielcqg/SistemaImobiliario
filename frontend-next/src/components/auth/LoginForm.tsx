@@ -61,8 +61,8 @@ export default function LoginForm({ onSwitchMode }: LoginFormProps) {
     event.preventDefault();
 
     const nextErrors: LoginFieldErrors = {
-      email: validateEmail(email),
-      password: validatePassword(password)
+      email: validateEmail(email) ?? undefined,
+      password: validatePassword(password) ?? undefined
     };
 
     const hasErrors = Object.values(nextErrors).some(Boolean);

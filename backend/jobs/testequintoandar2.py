@@ -1,840 +1,676 @@
-"use client";
+import asyncio
+import os
+import re
+import random
+import zlib
+import unicodedata
+import uuid
+from pathlib import Path
+from datetime import datetime, timezone
 
-import dynamic from "next/dynamic";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Button from "@/components/ui/Button";
-import Card from "@/components/ui/Card";
-import Input from "@/components/ui/Input";
-import SkeletonList from "@/components/ui/SkeletonList";
-import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
-import { useListings, type Listing } from "@/hooks/useListings";
-import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
-import { normalizeText } from "@/lib/format/text";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+from playwright.async_api import async_playwright
 
-const LazyRadarListingsGrid = dynamic(
-  () => import("@/components/radar/RadarListingsGrid"),
-  {
-    ssr: false,
-    loading: () => <SkeletonList />
-  }
-);
+# -----------------------------
+# 1. Configuração
+# -----------------------------
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if not env_path.exists():
+    env_path = Path(__file__).resolve().parent / ".env"
 
-const dayOptions = [
-  { label: "7 dias", value: 7 },
-  { label: "15 dias", value: 15 },
-  { label: "30 dias", value: 30 }
-] as const;
+try:
+    from dotenv import load_dotenv
 
-const portals = ["", "vivareal", "zap", "imovelweb"] as const;
-const sortOptions = [
-  { label: "Mais recentes", value: "date_desc" },
-  { label: "Mais antigos", value: "date_asc" },
-  { label: "Preco: menor -> maior", value: "price_asc" },
-  { label: "Preco: maior -> menor", value: "price_desc" }
-] as const;
+    load_dotenv(dotenv_path=env_path)
+except ImportError:
+    pass
 
-const portalBadges = ["vivareal", "zap", "imovelweb", "outros"] as const;
-type PortalBadge = (typeof portalBadges)[number];
+try:
+    from supabase import create_client
+except ImportError:
+    create_client = None
 
-const portalFilterByBadge: Record<PortalBadge, string> = {
-  vivareal: "vivareal",
-  zap: "zap",
-  imovelweb: "imovelweb",
-  outros: ""
-};
+BASE_URL = "https://www.quintoandar.com.br/comprar/imovel/campinas-sp-brasil"
 
-type RadarListing = Listing & {
-  latitude?: number | null;
-  longitude?: number | null;
-  scraped_at?: string | null;
-  last_seen_at?: string | null;
-};
+# ✅ Opcional (recomendado): defina no .env para refletir o CHECK do banco, ex:
+# LISTINGS_PROPERTY_TYPES=apartment,house,land,commercial,other
+#
+# Se não definir, por segurança assumimos só apartment/house (pra NÃO quebrar upsert).
+def _get_allowed_property_types() -> set:
+    raw = (os.getenv("LISTINGS_PROPERTY_TYPES") or "").strip()
+    if not raw:
+        return {"apartment", "house"}  # modo seguro
+    return {x.strip().lower() for x in raw.split(",") if x.strip()}
 
-type PortalActivity = {
-  count: number;
-  until: number;
-};
 
-type RadarEvent = {
-  id: string;
-  message: string;
-  at: number;
-};
+ALLOWED_PROPERTY_TYPES = _get_allowed_property_types()
 
-const REALTIME_FLUSH_MS = 400;
 
-function useDebouncedValue<T>(value: T, delayMs: number) {
-  const [debounced, setDebounced] = useState(value);
+def _fallback_property_type(allowed: set) -> str:
+    # “Outros” só se existir no seu CHECK (ou se você colocar no .env)
+    if "other" in allowed:
+        return "other"
+    if "apartment" in allowed:
+        return "apartment"
+    if "house" in allowed:
+        return "house"
+    # último fallback (nunca deveria acontecer)
+    return next(iter(allowed)) if allowed else "apartment"
 
-  useEffect(() => {
-    const handle = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(handle);
-  }, [value, delayMs]);
 
-  return debounced;
-}
+FALLBACK_PROPERTY_TYPE = _fallback_property_type(ALLOWED_PROPERTY_TYPES)
 
-const getListingFirstSeen = (listing: RadarListing) =>
-  listing.first_seen_at ?? null;
+# ✅ DEDUPE KEY ------------------------------------------------------------
+# Objetivo: sempre mandar dedupe_key (NOT NULL no banco), de forma determinística,
+# estável em updates (não depende de preço), e com chance de casar cross-portal
+# quando tiverem o mesmo endereço/bairro/cidade/área/quartos.
+def _strip_accents(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
 
-const parseDateSafe = (value?: string | null): Date | null => {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-};
 
-const getTimeSafe = (value?: string | null): number | null => {
-  const date = parseDateSafe(value);
-  return date ? date.getTime() : null;
-};
+def _norm_text(s: str) -> str:
+    s = str(s or "").strip().lower()
+    if not s:
+        return ""
+    s = _strip_accents(s)
+    # remove pontuação e normaliza espaços
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-const formatRelativeTime = (date: Date) => {
-  const diff = Date.now() - date.getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "agora";
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
-};
 
-export default function BuscadorPage() {
-  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
-  const {
-    data,
-    loading,
-    error,
-    page,
-    hasNextPage,
-    filters,
-    setFilters,
-    setPage,
-    pageSize
-  } = useListings({ maxDaysFresh: 15 });
+def _remove_numbers_tokens(s: str) -> str:
+    # remove tokens com dígitos (nº, apto 12, 150, etc.) para facilitar match
+    # (se isso te atrapalhar, é só comentar esta linha)
+    s = re.sub(r"\b\w*\d\w*\b", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-  const [minPriceInput, setMinPriceInput] = useState("");
-  const [maxPriceInput, setMaxPriceInput] = useState("");
-  const [neighborhoodQuery, setNeighborhoodQuery] = useState("");
 
-  const [displayListings, setDisplayListings] = useState<Listing[]>([]);
-  const [radarListings, setRadarListings] = useState<RadarListing[]>([]);
-  const [radarLoading, setRadarLoading] = useState(false);
-  const [radarError, setRadarError] = useState<string | null>(null);
-  const [portalActivity, setPortalActivity] = useState<
-    Record<string, PortalActivity>
-  >({});
-  const [eventFeed, setEventFeed] = useState<RadarEvent[]>([]);
-  const [realtimeHealthy, setRealtimeHealthy] = useState(true);
-  const [radarEnabled, setRadarEnabled] = useState(true);
-  const [lastRadarSyncAt, setLastRadarSyncAt] = useState<number | null>(null);
+def _bucket_area(area_m2) -> int:
+    try:
+        a = float(area_m2 or 0)
+    except Exception:
+        a = 0.0
+    if a <= 0:
+        return 0
+    # bucket de 5m² (ex: 67 -> 65)
+    return int(round(a / 5.0) * 5)
 
-  const filtersRef = useRef(filters);
-  const pageRef = useRef(page);
-  const realtimeQueueRef = useRef<RadarListing[]>([]);
-  const realtimeFlushRef = useRef<number | null>(null);
 
-  const debouncedNeighborhood = useDebouncedValue(
-    filters.neighborhood_normalized ?? "",
-    400
-  );
+def build_dedupe_key(row: dict) -> str:
+    # Preferimos rua/endereço, senão cai no título
+    city = _norm_text(row.get("city") or "")
+    state = _norm_text(row.get("state") or "")
+    neighborhood = _norm_text(row.get("neighborhood") or "")
 
-  const emptyState = !loading && displayListings.length === 0;
-  const shouldShowListingsSkeleton = loading && displayListings.length === 0;
+    street_raw = row.get("street") or ""
+    title_raw = row.get("title") or ""
+    base_raw = street_raw if _norm_text(street_raw) else title_raw
 
-  useEffect(() => {
-    filtersRef.current = filters;
-  }, [filters]);
+    base = _norm_text(base_raw)
+    base = _remove_numbers_tokens(base)
 
-  useEffect(() => {
-    pageRef.current = page;
-  }, [page]);
+    beds = int(row.get("bedrooms") or 0)
+    area_bucket = _bucket_area(row.get("area_m2"))
 
-  useEffect(() => {
-    if (radarEnabled) return;
-    setEventFeed([]);
-    setPortalActivity({});
-    setRealtimeHealthy(true);
-  }, [radarEnabled]);
+    portal = _norm_text(row.get("portal") or "")
+    ext = str(row.get("external_id") or "").strip()
 
-  useEffect(() => {
-    setMinPriceInput(
-      typeof filters.minPrice === "number"
-        ? formatThousandsBR(String(filters.minPrice))
-        : ""
-    );
-  }, [filters.minPrice]);
+    # Se não temos base suficiente, garantimos estabilidade por portal+external_id
+    if len(base) < 6 and not neighborhood:
+        key_str = f"homeradar|fallback|{portal}|{ext}"
+    else:
+        key_str = f"homeradar|{city}|{state}|{neighborhood}|{base}|b{beds}|a{area_bucket}"
 
-  useEffect(() => {
-    setMaxPriceInput(
-      typeof filters.maxPrice === "number"
-        ? formatThousandsBR(String(filters.maxPrice))
-        : ""
-    );
-  }, [filters.maxPrice]);
+    # UUID v5 determinístico (serve tanto se dedupe_key for UUID quanto TEXT)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key_str))
 
-  useEffect(() => {
-    if (!filters.neighborhood_normalized) {
-      setNeighborhoodQuery("");
-    }
-  }, [filters.neighborhood_normalized]);
 
-  useEffect(() => {
-    setDisplayListings(data);
-  }, [data]);
+def ensure_dedupe_key(row: dict) -> dict:
+    if not row:
+        return row
+    dk = row.get("dedupe_key")
+    if dk and str(dk).strip():
+        return row
+    row["dedupe_key"] = build_dedupe_key(row)
+    return row
+# -------------------------------------------------------------------------
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      setPortalActivity((prev) => {
-        const next: Record<string, PortalActivity> = {};
-        Object.entries(prev).forEach(([portal, activity]) => {
-          if (activity.until > now) {
-            next[portal] = activity;
-          }
-        });
 
-        const prevKeys = Object.keys(prev);
-        const nextKeys = Object.keys(next);
-        if (prevKeys.length !== nextKeys.length) {
-          return next;
+# -----------------------------
+# 2. Utils e Parsers
+# -----------------------------
+def clean_number(text: str) -> float:
+    if not text:
+        return 0.0
+    clean = re.sub(r"[^\d,]", "", text)
+    clean = clean.replace(",", ".")
+    try:
+        return float(clean)
+    except:
+        return 0.0
+
+
+def clean_int(text: str) -> int:
+    if not text:
+        return 0
+    clean = re.sub(r"[^\d]", "", text)
+    try:
+        return int(clean)
+    except:
+        return 0
+
+
+def extract_external_id(url: str) -> str:
+    """
+    Preferencialmente extrai /imovel/<id>.
+    Se não achar, cria um id determinístico pela URL (evita random e duplicação).
+    """
+    if not url:
+        return "0"
+    match = re.search(r"/imovel/(\d+)", url)
+    if match:
+        return match.group(1)
+
+    # fallback determinístico
+    return str(abs(zlib.adler32(url.encode("utf-8"))))
+
+
+def normalize_property_type(text: str, allowed: set = None) -> str:
+    """
+    ✅ IMPORTANTE: precisa bater com o CHECK CONSTRAINT do banco.
+    - Nunca retorna algo fora de `allowed`
+    - Se vier "studio" (como no seu erro), cai em "other" se existir, senão cai no fallback seguro.
+    """
+    allowed = allowed or ALLOWED_PROPERTY_TYPES
+    fallback = _fallback_property_type(allowed)
+
+    if not text:
+        return fallback
+
+    t = str(text).lower().strip()
+
+    # --- Mapeamento (bruto -> canônico) ---
+    if any(k in t for k in ["studio", "kitnet", "loft", "flat"]):
+        return "other" if "other" in allowed else fallback
+
+    if any(k in t for k in ["casa", "sobrado"]):
+        return "house" if "house" in allowed else fallback
+
+    if "apart" in t:
+        return "apartment" if "apartment" in allowed else fallback
+
+    if any(k in t for k in ["lote", "terreno", "land"]):
+        return "land" if "land" in allowed else fallback
+
+    if any(k in t for k in ["comercial", "loja", "sala", "office"]):
+        return "commercial" if "commercial" in allowed else fallback
+
+    return "other" if "other" in allowed else fallback
+
+
+def check_is_new(text_date: str) -> bool:
+    if not text_date:
+        return False
+    return bool(re.search(r"(hora|minuto|segundo|agora|novo|hoje)", text_date.lower()))
+
+
+def _build_quintoandar_image_url(value: str) -> str:
+    if not value:
+        return ""
+    v = str(value).strip()
+    if v.startswith("http://") or v.startswith("https://"):
+        return v
+    if v.startswith("/"):
+        return "https://www.quintoandar.com.br" + v
+    return "https://www.quintoandar.com.br/img/med/original" + v
+
+
+def _fallback_neighborhood_from_dom(h2_text: str, full_text: str) -> str:
+    h2 = (h2_text or "").strip()
+    if " em " in h2:
+        part = h2.split(" em ", 1)[-1]
+        part = re.split(r"\scom\s|\sde\s|\(|\.", part)[0].strip()
+        if part and len(part) >= 3:
+            return part
+
+    txt = full_text or ""
+    m = re.search(r",\s*([^·\n,]{3,})\s*·\s*Campinas", txt, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    return ""
+
+
+# -----------------------------
+# 3. Listener da API (cache)
+# -----------------------------
+def attach_quintoandar_api_listener(page, api_by_id: dict):
+    async def capture_response(response):
+        try:
+            ct = (response.headers.get("content-type") or "").lower()
+            if "application/json" not in ct:
+                return
+
+            data = await response.json()
+            hits = (data.get("hits") or {}).get("hits")
+            if not isinstance(hits, list) or not hits:
+                return
+
+            for hit in hits:
+                src = hit.get("_source") or {}
+                listing_id = src.get("id") or hit.get("_id")
+                if listing_id is None:
+                    continue
+                api_by_id[str(listing_id)] = src
+
+        except Exception:
+            return
+
+    page.on("response", lambda resp: asyncio.create_task(capture_response(resp)))
+
+
+# -----------------------------
+# 4. Extração (API-first)
+# -----------------------------
+async def extract_card_data(card_element, api_by_id: dict) -> dict:
+    raw = await card_element.evaluate(
+        """(card) => {
+            const a = card.querySelector('a');
+            const img = card.querySelector('img');
+            const h2 = card.querySelector('h2');
+            return {
+                url: a ? a.getAttribute('href') : "",
+                img: img ? img.src : "",
+                h2_text: h2 ? h2.innerText : "",
+                full_text: card.innerText || ""
+            }
+        }"""
+    )
+
+    full_url = (
+        "https://www.quintoandar.com.br" + raw["url"]
+        if raw["url"] and raw["url"].startswith("/")
+        else (raw["url"] or "")
+    )
+    ext_id = extract_external_id(full_url)
+
+    src = api_by_id.get(str(ext_id))
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    title = (raw.get("h2_text") or "").strip() or f"imóvel {ext_id}"
+
+    # Fallback se ainda não capturou no cache
+    if not src:
+        neighborhood = _fallback_neighborhood_from_dom(raw.get("h2_text"), raw.get("full_text"))
+        raw_pt = raw.get("h2_text") or ""
+        property_type = normalize_property_type(raw_pt)
+
+        return {
+            "external_id": str(ext_id),
+            "portal": "quintoandar",
+            "url": full_url,
+            "title": title,
+            "price": 0.0,
+            "city": "Campinas",
+            "state": "SP",
+            "neighborhood": neighborhood,
+            "street": "",
+            "property_type": property_type,
+            "area_m2": 0.0,
+            "bedrooms": 0,
+            "parking": 0,
+            "bathrooms": 0,
+            "condo_fee": 0.0,
+            "iptu": 0.0,
+            "main_image_url": raw.get("img") or "",
+            "images": [raw["img"]] if raw.get("img") else [],
+            "is_active": True,
+            "is_below_market": "Ótimo preço" in (raw.get("full_text") or ""),
+            "scraped_at": now_iso,
+            "published_at": now_iso,
+            "last_seen_at": now_iso,
+            "full_data": {
+                "h2_text": raw.get("h2_text"),
+                "raw_text": raw.get("full_text"),
+                "api_source": None,
+                "property_type_raw": raw_pt,
+                "property_type_allowed": sorted(list(ALLOWED_PROPERTY_TYPES)),
+            },
         }
 
-        const changed = prevKeys.some((key) => {
-          const prevActivity = prev[key];
-          const nextActivity = next[key];
-          if (!prevActivity || !nextActivity) return true;
-          return (
-            prevActivity.count !== nextActivity.count ||
-            prevActivity.until !== nextActivity.until
-          );
-        });
+    # -------- Map JSON -> schema --------
+    src_id = str(src.get("id") or ext_id)
 
-        return changed ? next : prev;
-      });
-    }, 500);
+    raw_pt = (src.get("type") or "")
+    property_type = normalize_property_type(raw_pt)
 
-    return () => clearInterval(interval);
-  }, []);
+    area = float(src.get("area") or 0)
+    bathrooms = int(src.get("bathrooms") or 0)
+    bedrooms = int(src.get("bedrooms") or 0)
+    parking = int(src.get("parkingSpaces") or 0)
 
-  const fetchRadarData = useCallback(async () => {
-    if (!radarEnabled) {
-      setRadarLoading(false);
-      return;
-    }
+    street = (src.get("address") or "").strip()
+    city = (src.get("city") or "Campinas").strip()
 
-    setRadarLoading(true);
-    setRadarError(null);
+    neighborhood = (src.get("neighbourhood") or src.get("regionName") or "").strip()
+    if not neighborhood:
+        neighborhood = _fallback_neighborhood_from_dom(raw.get("h2_text"), raw.get("full_text"))
 
-    const cutoffDate = new Date(
-      Date.now() - filters.maxDaysFresh * 24 * 60 * 60 * 1000
-    ).toISOString();
+    price = float(src.get("salePrice") or src.get("rent") or 0)
 
-    const selectBase =
-      "id, title, price, city, neighborhood, neighborhood_normalized, portal, first_seen_at, scraped_at, last_seen_at, main_image_url, url";
-    const selectWithGeo = `${selectBase}, latitude, longitude`;
+    condo_fee = float(
+        src.get("iptuPlusCondominium")
+        or src.get("condominium")
+        or src.get("condoFee")
+        or 0
+    )
+    iptu = float(src.get("iptu") or 0)
 
-    const buildQuery = (select: string) => {
-      let query = supabase
-        .from("listings")
-        .select(select)
-        .eq("city", "Campinas")
-        .gte("first_seen_at", cutoffDate)
-        .order("first_seen_at", { ascending: false })
-        .limit(240);
+    images = []
+    if raw.get("img"):
+        images.append(raw["img"])
 
-      if (filters.portal) {
-        query = query.eq("portal", filters.portal);
-      }
+    cover = _build_quintoandar_image_url(src.get("coverImage") or "")
+    if cover:
+        images.append(cover)
 
-      if (debouncedNeighborhood) {
-        query = query.like(
-          "neighborhood_normalized",
-          `${debouncedNeighborhood.trim()}%`
-        );
-      }
+    image_list = src.get("imageList") or []
+    if isinstance(image_list, list):
+        for it in image_list:
+            if isinstance(it, str) and it.strip():
+                images.append(_build_quintoandar_image_url(it))
+            elif isinstance(it, dict):
+                u = it.get("url") or it.get("src") or it.get("path") or it.get("image")
+                if u:
+                    images.append(_build_quintoandar_image_url(u))
 
-      return query;
-    };
+    seen = set()
+    images = [x for x in images if x and (x not in seen and not seen.add(x))]
 
-    let { data: rows, error: queryError } = await buildQuery(selectWithGeo);
+    main_image_url = raw.get("img") or (images[0] if images else "")
 
-    if (
-      queryError &&
-      /column.*(latitude|longitude)/i.test(queryError.message)
-    ) {
-      const fallback = await buildQuery(selectBase);
-      rows = fallback.data;
-      queryError = fallback.error;
-    }
-
-    if (queryError) {
-      setRadarError(queryError.message);
-      setRadarListings([]);
-      setRadarLoading(false);
-      return;
-    }
-
-    const rawRows = Array.isArray(rows) ? (rows as unknown[]) : [];
-    const list: RadarListing[] = rawRows.filter(
-      (item): item is RadarListing =>
-        !!item && typeof item === "object" && "id" in item
-    );
-
-    setRadarListings(list.slice(0, 300));
-    setLastRadarSyncAt(Date.now());
-    setRadarLoading(false);
-  }, [supabase, filters.maxDaysFresh, filters.portal, debouncedNeighborhood, radarEnabled]);
-
-  useEffect(() => {
-    fetchRadarData();
-  }, [fetchRadarData, radarEnabled]);
-
-  useEffect(() => {
-    if (!radarEnabled) {
-      setRealtimeHealthy(true);
-      return;
-    }
-
-    const flushQueue = () => {
-      realtimeFlushRef.current = null;
-      const queue = realtimeQueueRef.current.splice(0);
-      if (queue.length === 0) return;
-
-      const now = Date.now();
-      const newEvents: RadarEvent[] = [];
-      const portalCounts: Record<string, number> = {};
-
-      queue.forEach((listing) => {
-        const listingId = listing.id;
-        const timestamp = getListingFirstSeen(listing);
-        const timestampDate = parseDateSafe(timestamp);
-        if (!timestampDate) return;
-
-        const neighborhoodLabel =
-          listing.neighborhood ||
-          listing.neighborhood_normalized ||
-          "Bairro desconhecido";
-
-        newEvents.push({
-          id: `${listingId}-${now}`,
-          message: `Novo imovel em ${neighborhoodLabel} · ${formatRelativeTime(timestampDate)}`,
-          at: now
-        });
-
-        const portalKey = portalBadges.includes(
-          (listing.portal || "").toLowerCase() as PortalBadge
-        )
-          ? (listing.portal || "").toLowerCase()
-          : "outros";
-
-        portalCounts[portalKey] = (portalCounts[portalKey] ?? 0) + 1;
-      });
-
-      if (pageRef.current === 0) {
-        setDisplayListings((prev) => {
-          const next = [
-            ...queue,
-            ...prev.filter((item) => !queue.some((entry) => entry.id === item.id))
-          ];
-          return next.slice(0, pageSize);
-        });
-      }
-
-      setRadarListings((prev) => {
-        const next = [
-          ...queue,
-          ...prev.filter((item) => !queue.some((entry) => entry.id === item.id))
-        ];
-        return next.slice(0, 300);
-      });
-      setLastRadarSyncAt(Date.now());
-
-      setPortalActivity((prev) => {
-        const next = { ...prev };
-        Object.entries(portalCounts).forEach(([portal, count]) => {
-          const current = next[portal] ?? { count: 0, until: 0 };
-          next[portal] = {
-            count: current.count + count,
-            until: Date.now() + 2400
-          };
-        });
-        return next;
-      });
-
-      setEventFeed((prev) => {
-        const merged = [...newEvents, ...prev];
-        return merged.slice(0, 6);
-      });
-    };
-
-    const channel = supabase
-      .channel("radar-listings")
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "listings",
-          filter: "city=eq.Campinas"
-        },
-        (payload) => {
-          const listing = payload.new as RadarListing;
-          if (!listing) return;
-
-          const currentFilters = filtersRef.current;
-          const timestamp = getListingFirstSeen(listing);
-          if (!timestamp) return;
-
-          const timestampMs = getTimeSafe(timestamp);
-          if (!timestampMs) return;
-
-          const isWithinPeriod =
-            timestampMs >=
-            Date.now() - currentFilters.maxDaysFresh * 24 * 60 * 60 * 1000;
-
-          if (!isWithinPeriod) return;
-
-          if (currentFilters.portal && listing.portal !== currentFilters.portal) {
-            return;
-          }
-
-          if (currentFilters.neighborhood_normalized) {
-            const pattern = currentFilters.neighborhood_normalized
-              .trim()
-              .toLowerCase();
-            const candidate = listing.neighborhood_normalized
-              ? listing.neighborhood_normalized.toLowerCase()
-              : normalizeText(listing.neighborhood ?? "");
-            if (!candidate.startsWith(pattern)) return;
-          }
-
-          if (
-            typeof currentFilters.minPrice === "number" &&
-            typeof listing.price === "number" &&
-            listing.price < currentFilters.minPrice
-          ) {
-            return;
-          }
-
-          if (
-            typeof currentFilters.maxPrice === "number" &&
-            typeof listing.price === "number" &&
-            listing.price > currentFilters.maxPrice
-          ) {
-            return;
-          }
-
-          if (
-            typeof currentFilters.minBedrooms === "number" &&
-            typeof listing.bedrooms === "number" &&
-            listing.bedrooms < currentFilters.minBedrooms
-          ) {
-            return;
-          }
-
-          realtimeQueueRef.current.push(listing);
-          if (realtimeFlushRef.current === null) {
-            realtimeFlushRef.current = window.setTimeout(
-              flushQueue,
-              REALTIME_FLUSH_MS
-            );
-          }
-        }
-      )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          setRealtimeHealthy(true);
-          return;
-        }
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          setRealtimeHealthy(false);
-        }
-      });
-
-    return () => {
-      channel.unsubscribe();
-      if (realtimeFlushRef.current) {
-        window.clearTimeout(realtimeFlushRef.current);
-        realtimeFlushRef.current = null;
-      }
-      realtimeQueueRef.current = [];
-    };
-  }, [supabase, pageSize, radarEnabled]);
-
-  useEffect(() => {
-    if (!radarEnabled) return;
-    if (realtimeHealthy) return;
-
-    const poll = setInterval(() => {
-      fetchRadarData();
-    }, 60000);
-
-    return () => clearInterval(poll);
-  }, [realtimeHealthy, fetchRadarData, radarEnabled]);
-
-  const new2h = useMemo(() => {
-    const now = Date.now();
-    return radarListings.filter((listing) => {
-      const timestamp = getListingFirstSeen(listing);
-      const timestampMs = getTimeSafe(timestamp);
-      return (
-        typeof timestampMs === "number" &&
-        now - timestampMs <= 2 * 60 * 60 * 1000
-      );
-    }).length;
-  }, [radarListings]);
-
-  const new24h = useMemo(() => {
-    const now = Date.now();
-    return radarListings.filter((listing) => {
-      const timestamp = getListingFirstSeen(listing);
-      const timestampMs = getTimeSafe(timestamp);
-      return (
-        typeof timestampMs === "number" &&
-        now - timestampMs <= 24 * 60 * 60 * 1000
-      );
-    }).length;
-  }, [radarListings]);
-
-  const portalPresence = useMemo<Record<PortalBadge, boolean>>(() => {
-    const presence: Record<PortalBadge, boolean> = {
-      vivareal: false,
-      zap: false,
-      imovelweb: false,
-      outros: false
-    };
-
-    radarListings.forEach((listing) => {
-      const portal = (listing.portal || "").toLowerCase();
-      if (portal === "vivareal" || portal === "zap" || portal === "imovelweb") {
-        presence[portal] = true;
-        return;
-      }
-      presence.outros = true;
-    });
-
-    return presence;
-  }, [radarListings]);
-
-  const activePortalsCount = useMemo(
-    () =>
-      portalBadges.filter(
-        (portal) => portal !== "imovelweb" && portalPresence[portal]
-      ).length,
-    [portalPresence]
-  );
-
-  const opportunities = useMemo(() => {
-    const missingPrice = radarListings.filter(
-      (listing) => typeof listing.price !== "number"
-    ).length;
-    const missingImage = radarListings.filter(
-      (listing) => !listing.main_image_url
-    ).length;
-    const missingNeighborhood = radarListings.filter(
-      (listing) => !listing.neighborhood && !listing.neighborhood_normalized
-    ).length;
+    if not title:
+        title = f"{property_type} em {neighborhood or city}"
 
     return {
-      missingPrice,
-      missingImage,
-      missingNeighborhood
-    };
-  }, [radarListings]);
+        "external_id": src_id,
+        "portal": "quintoandar",
+        "url": full_url,
+        "title": title,
+        "price": price,
+        "city": city,
+        "state": "SP",
+        "neighborhood": neighborhood,
+        "street": street,
+        "property_type": property_type,
+        "area_m2": area,
+        "bedrooms": bedrooms,
+        "parking": parking,
+        "bathrooms": bathrooms,
+        "condo_fee": condo_fee,
+        "iptu": iptu,
+        "main_image_url": main_image_url,
+        "images": images,
+        "is_active": True,
+        "is_below_market": "Ótimo preço" in (raw.get("full_text") or ""),
+        "scraped_at": now_iso,
+        "published_at": now_iso,
+        "last_seen_at": now_iso,
+        "full_data": {
+            "h2_text": raw.get("h2_text"),
+            "raw_text": raw.get("full_text"),
+            "api_source": src,
+            "property_type_raw": raw_pt,
+            "property_type_normalized": property_type,
+            "property_type_allowed": sorted(list(ALLOWED_PROPERTY_TYPES)),
+        },
+    }
 
-  const recentListings = useMemo(() => radarListings.slice(0, 6), [radarListings]);
 
-  const lastSyncLabel = useMemo(() => {
-    if (!lastRadarSyncAt) return "Aguardando primeira sincronizacao";
-    return `Atualizado ${formatRelativeTime(new Date(lastRadarSyncAt))}`;
-  }, [lastRadarSyncAt]);
+# -----------------------------
+# 5. Funções Auxiliares (Filtro, Data, etc)
+# -----------------------------
+async def force_filter_interaction(page):
+    print("🛠️  Aplicando filtro 'Mais recentes'...")
+    sort_btn = (
+        page.locator('div[role="button"], div[class*="Chip"]')
+        .filter(has_text=re.compile(r"Mais (recentes|relevantes)|Relevância"))
+        .first
+    )
+    if await sort_btn.count() == 0:
+        sort_btn = page.locator('div:has(svg):has-text("Mais")').first
 
-  return (
-    <div className="space-y-6">
-      <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
-        <Card className="space-y-6">
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.4em] text-zinc-500">
-              Filtros
-            </p>
-            <h3 className="mt-2 text-lg font-semibold">Ajuste o radar</h3>
-          </div>
+    if await sort_btn.count() > 0:
+        txt = await sort_btn.inner_text()
+        if "recentes" in txt.lower():
+            return True
 
-          <div className="space-y-2">
-            <label className="text-xs text-zinc-500">Dias frescos</label>
-            <div className="flex rounded-full border border-zinc-800 bg-black/60 p-1">
-              {dayOptions.map((option) => {
-                const active = filters.maxDaysFresh === option.value;
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    onClick={() =>
-                      setFilters({ maxDaysFresh: option.value as 7 | 15 | 30 })
-                    }
-                    className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
-                      active
-                        ? "bg-white text-black"
-                        : "text-zinc-400 hover:text-white"
-                    }`}
-                    aria-pressed={active}
-                  >
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+        await sort_btn.click()
+        try:
+            opt = page.locator('li, div[role="option"]').filter(has_text="Mais recentes").first
+            await opt.wait_for(state="visible", timeout=5000)
+            await opt.click(force=True)
+            await asyncio.sleep(3)
+            return True
+        except:
+            return False
+    return False
 
-          <div className="grid gap-4">
-            <NeighborhoodAutocomplete
-              label="Bairro"
-              placeholder="Digite o bairro"
-              city="Campinas"
-              value={neighborhoodQuery}
-              onChange={(nextValue) => {
-                setNeighborhoodQuery(nextValue);
-                setFilters({
-                  neighborhood_normalized: normalizeText(nextValue)
-                });
-              }}
-              onSelect={(item) => {
-                setNeighborhoodQuery(item.name);
-                setFilters({
-                  neighborhood_normalized: item.name_normalized
-                });
-              }}
-              onClear={() => {
-                setNeighborhoodQuery("");
-                setFilters({ neighborhood_normalized: "" });
-              }}
-            />
 
-            <div className="space-y-2">
-              <label className="text-xs text-zinc-500">Portal</label>
-              <select
-                value={filters.portal ?? ""}
-                onChange={(event) =>
-                  setFilters({ portal: event.target.value || "" })
-                }
-                className="w-full rounded-lg border border-zinc-800 bg-black/60 px-4 py-2 text-sm text-white"
-              >
-                <option value="">Todos</option>
-                {portals
-                  .filter((portal) => portal)
-                  .map((portal) => (
-                    <option key={portal} value={portal}>
-                      {portal}
-                    </option>
-                  ))}
-              </select>
-            </div>
+async def click_load_more(page):
+    btn = page.locator('button[data-testid="load-more-button"]')
+    if await btn.count() > 0 and await btn.is_visible():
+        try:
+            await btn.scroll_into_view_if_needed()
+            await btn.click()
+            await asyncio.sleep(2)
+            return True
+        except:
+            pass
+    return False
 
-            <div className="space-y-2">
-              <label className="text-xs text-zinc-500">Ordenar por</label>
-              <select
-                value={filters.sort ?? "date_desc"}
-                onChange={(event) =>
-                  setFilters({
-                    sort: event.target.value as
-                      | "date_desc"
-                      | "date_asc"
-                      | "price_asc"
-                      | "price_desc"
-                  })
-                }
-                className="w-full rounded-lg border border-zinc-800 bg-black/60 px-4 py-2 text-sm text-white"
-              >
-                {sortOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2">
-                <label className="text-xs text-zinc-500">Preco min.</label>
-                <Input
-                  type="text"
-                  placeholder="100.000"
-                  value={minPriceInput}
-                  onChange={(event) => {
-                    const formatted = formatThousandsBR(event.target.value);
-                    setMinPriceInput(formatted);
-                    const parsed = parseBRNumber(formatted);
-                    setFilters({
-                      minPrice: parsed ?? undefined
-                    });
-                  }}
-                />
-              </div>
+async def get_details_date(context, card_element) -> str:
+    page_detail = await context.new_page()
+    try:
+        href = await card_element.eval_on_selector("a", "el => el.href")
+        await page_detail.goto(href)
+        await page_detail.wait_for_load_state("domcontentloaded")
+        try:
+            loc = page_detail.locator('[data-testid="publication_date"]')
+            await loc.wait_for(timeout=2500)
+            text = await loc.inner_text()
+            return text
+        except:
+            return ""
+    except:
+        return ""
+    finally:
+        await page_detail.close()
 
-              <div className="space-y-2">
-                <label className="text-xs text-zinc-500">Preco max.</label>
-                <Input
-                  type="text"
-                  placeholder="900.000"
-                  value={maxPriceInput}
-                  onChange={(event) => {
-                    const formatted = formatThousandsBR(event.target.value);
-                    setMaxPriceInput(formatted);
-                    const parsed = parseBRNumber(formatted);
-                    setFilters({
-                      maxPrice: parsed ?? undefined
-                    });
-                  }}
-                />
-              </div>
-            </div>
 
-            <div className="space-y-2">
-              <label className="text-xs text-zinc-500">Quartos min.</label>
-              <Input
-                type="number"
-                placeholder="2"
-                value={filters.minBedrooms ?? ""}
-                onChange={(event) =>
-                  setFilters({
-                    minBedrooms: event.target.value
-                      ? Number(event.target.value)
-                      : undefined
-                  })
-                }
-              />
-            </div>
-          </div>
+def _looks_like_property_type_constraint_error(e: Exception) -> bool:
+    s = str(e)
+    return ("listings_property_type_check" in s) or (
+        "violates check constraint" in s and "property_type" in s
+    )
 
-          <Button
-            variant="ghost"
-            className="h-8 px-3 text-xs uppercase tracking-[0.3em]"
-            onClick={() => {
-              setNeighborhoodQuery("");
-              setFilters({
-                maxDaysFresh: 15,
-                neighborhood_normalized: "",
-                minPrice: undefined,
-                maxPrice: undefined,
-                minBedrooms: undefined,
-                portal: "",
-                sort: "date_desc"
-              });
-            }}
-          >
-            Limpar
-          </Button>
-        </Card>
 
-        <div className="space-y-6">
-          <Card className="bg-black/60 px-4 py-3">
-            <div className="flex flex-wrap items-center gap-2 md:gap-3">
-              <span className="rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-100">
-                Novos 2h: {new2h}
-              </span>
-              <span className="rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-100">
-                Novos 24h: {new24h}
-              </span>
+def _coerce_row_property_type(row: dict, force_fallback: bool = False) -> dict:
+    if not row:
+        return row
 
-              <div className="flex basis-full flex-wrap items-center gap-2 sm:ml-auto sm:basis-auto">
-                {portalBadges.map((portal) => {
-                  const isImovelweb = portal === "imovelweb";
-                  const isActive = !isImovelweb && radarEnabled && portalPresence[portal];
-                  const filterValue = portalFilterByBadge[portal];
-                  const isDisabled = isImovelweb;
-                  const isSelected = (filters.portal ?? "") === filterValue;
+    allowed = ALLOWED_PROPERTY_TYPES
+    fallback = _fallback_property_type(allowed)
 
-                  return (
-                    <button
-                      key={portal}
-                      type="button"
-                      disabled={isDisabled}
-                      aria-disabled={isDisabled}
-                      aria-pressed={!isDisabled ? isSelected : undefined}
-                      onClick={() => {
-                        if (isDisabled) return;
-                        setFilters({ portal: filterValue });
-                        setPage(0);
-                      }}
-                      className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-black ${
-                        isDisabled
-                          ? "cursor-not-allowed border-zinc-800 bg-zinc-900/60 text-zinc-600"
-                          : isActive
-                          ? "border-emerald-500/70 bg-emerald-500/10 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)]"
-                          : "border-zinc-700 bg-zinc-900/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
-                      } ${
-                        isSelected && !isDisabled
-                          ? "ring-1 ring-emerald-400/60"
-                          : ""
-                      }`}
-                    >
-                      {portal.toUpperCase()}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </Card>
+    raw_pt = row.get("property_type") or ""
+    normalized = normalize_property_type(raw_pt, allowed=allowed)
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          </div>
+    if force_fallback:
+        normalized = fallback
 
-          {radarError ? (
-            <Card className="border-red-500/40 bg-red-500/10 text-sm text-red-200">
-              {radarError}
-            </Card>
-          ) : null}
+    if normalized not in allowed:
+        normalized = fallback
 
-          {!realtimeHealthy ? (
-            <Card className="border-yellow-500/40 bg-yellow-500/10 text-sm text-yellow-200">
-              Realtime desativado. O radar continua com polling a cada 60 segundos.
-            </Card>
-          ) : null}
+    row["property_type"] = normalized
+    return row
 
-          {error ? (
-            <Card className="border-red-500/40 bg-red-500/10 text-red-200">
-              {error}
-            </Card>
-          ) : null}
 
-          {emptyState ? (
-            <Card className="text-center">
-              <p className="text-lg font-semibold">Sem resultados</p>
-              <p className="mt-2 text-sm text-zinc-400">
-                Ajuste os filtros ou aguarde novos listings entrarem.
-              </p>
-            </Card>
-          ) : shouldShowListingsSkeleton ? (
-            <SkeletonList />
-          ) : (
-            <Suspense fallback={<SkeletonList />}>
-              <LazyRadarListingsGrid listings={displayListings} />
-            </Suspense>
-          )}
+async def save_to_supabase(data):
+    if not create_client or not data:
+        return
 
-          <div className="flex items-center justify-between text-sm text-zinc-500">
-            <span>Mostrando pagina {page + 1}</span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="ghost"
-                onClick={() => setPage(Math.max(0, page - 1))}
-                disabled={page === 0 || loading}
-              >
-                Anterior
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => setPage(page + 1)}
-                disabled={!hasNextPage || loading}
-              >
-                Proxima
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+    sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
+    # 1) sempre “sanitiza” antes:
+    #    - property_type (CHECK)
+    #    - dedupe_key (NOT NULL)
+    data2 = []
+    for row in data:
+        row = _coerce_row_property_type(row)
+        row = ensure_dedupe_key(row)  # ✅ DEDUPE KEY
+        data2.append(row)
+    data = data2
+
+    try:
+        sb.table("listings").upsert(data, on_conflict="portal,external_id").execute()
+        print(f"💾 Salvou lote de {len(data)} imóveis.")
+        return
+
+    except Exception as e:
+        if _looks_like_property_type_constraint_error(e):
+            print("⚠️ CHECK constraint em property_type. Fazendo fallback por item para não travar.")
+            ok = 0
+            fail = 0
+            for row in data:
+                try:
+                    row = _coerce_row_property_type(row, force_fallback=True)
+                    row = ensure_dedupe_key(row)  # ✅ DEDUPE KEY (redundância)
+                    sb.table("listings").upsert([row], on_conflict="portal,external_id").execute()
+                    ok += 1
+                except Exception as e2:
+                    fail += 1
+                    print(
+                        f"❌ Falhou item external_id={row.get('external_id')} "
+                        f"property_type={row.get('property_type')} "
+                        f"dedupe_key={row.get('dedupe_key')} err={e2}"
+                    )
+            print(f"💾 Salvou {ok} itens; {fail} falharam.")
+            return
+
+        print(f"❌ Erro Supabase: {e}")
+
+
+# -----------------------------
+# 6. Execução (Batch Progressivo)
+# -----------------------------
+async def run_scan(headless: bool):
+    print("🚀 Iniciando...")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(viewport={"width": 1366, "height": 768})
+        page = await context.new_page()
+
+        api_by_id = {}
+        attach_quintoandar_api_listener(page, api_by_id)
+
+        await page.goto(BASE_URL, wait_until="domcontentloaded")
+        await asyncio.sleep(3)
+
+        try:
+            await page.click('button:has-text("Aceitar")')
+        except:
+            pass
+
+        await force_filter_interaction(page)
+
+        for _ in range(30):
+            if api_by_id:
+                break
+            await asyncio.sleep(0.2)
+
+        card_selector = 'div[data-testid^="house-card-container"]'
+        await page.wait_for_selector(card_selector, timeout=20000)
+
+        BATCH_SIZE = 10
+        base_index = 0
+        stop_all = False
+
+        while not stop_all:
+            target_index_check = base_index + BATCH_SIZE - 1
+            cards = await page.query_selector_all(card_selector)
+
+            retries = 0
+            while len(cards) <= target_index_check:
+                print(f"📜 Carregando... (Temos {len(cards)}, precisamos {target_index_check + 1})")
+                clicked = await click_load_more(page)
+                if not clicked:
+                    await page.mouse.wheel(0, 1000)
+                await asyncio.sleep(2)
+                new_cards = await page.query_selector_all(card_selector)
+                if len(new_cards) == len(cards):
+                    retries += 1
+                    if retries >= 3:
+                        target_index_check = len(new_cards) - 1
+                        break
+                else:
+                    retries = 0
+                cards = new_cards
+
+            if base_index >= len(cards):
+                break
+
+            check_idx = min(target_index_check, len(cards) - 1)
+            print(f"🔍 Verificando lote {base_index}-{check_idx}...")
+
+            is_new = check_is_new(await get_details_date(context, cards[check_idx]))
+
+            if is_new:
+                print("✅ Lote NOVO. Salvando...")
+                batch_data = []
+                current_dom = await page.query_selector_all(card_selector)
+                for i in range(base_index, check_idx + 1):
+                    if i < len(current_dom):
+                        batch_data.append(await extract_card_data(current_dom[i], api_by_id))
+                await save_to_supabase(batch_data)
+
+                base_index += BATCH_SIZE
+                if check_idx == len(cards) - 1:
+                    stop_all = True
+
+            else:
+                print("🛑 Lote MISTO/ANTIGO. Buscando corte...")
+                low, high = base_index, check_idx
+                cutoff = -1
+
+                if not check_is_new(await get_details_date(context, cards[low])):
+                    cutoff = -1
+                else:
+                    while low + 1 < high:
+                        mid = (low + high) // 2
+                        if check_is_new(await get_details_date(context, cards[mid])):
+                            low = mid
+                        else:
+                            high = mid
+                    cutoff = low
+
+                if cutoff >= base_index:
+                    print(f"💰 Salvando final (até {cutoff})...")
+                    final_batch = []
+                    current_dom = await page.query_selector_all(card_selector)
+                    for i in range(base_index, cutoff + 1):
+                        if i < len(current_dom):
+                            final_batch.append(await extract_card_data(current_dom[i], api_by_id))
+                    await save_to_supabase(final_batch)
+
+                stop_all = True
+
+        await browser.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(run_scan(headless=True))

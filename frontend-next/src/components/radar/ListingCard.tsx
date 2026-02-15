@@ -6,6 +6,7 @@ import {
   useReducedMotion,
   useTransform
 } from "framer-motion";
+import Image from "next/image";
 import { useMemo } from "react";
 import type { MouseEvent } from "react";
 import type { Listing } from "@/hooks/useListings";
@@ -101,30 +102,45 @@ export default function ListingCard({ listing }: ListingCardProps) {
   }, [listing.area_m2, listing.bathrooms, listing.bedrooms, listing.parking]);
 
   return (
-    <motion.div
-      onMouseMove={handleMouseMove}
-      onMouseLeave={handleMouseLeave}
-      style={
-        shouldReduceMotion
-          ? undefined
-          : { rotateX, rotateY, transformStyle: "preserve-3d" }
-      }
-      className="relative rounded-2xl border border-zinc-800 bg-white/5 p-5 shadow-glow backdrop-blur-md transition-colors duration-150 focus-within:border-white/40"
-      whileHover={shouldReduceMotion ? undefined : { scale: 1.01 }}
-      transition={{ duration: 0.15, ease: "easeOut" }}
-    >
+    <div className="relative overflow-visible">
       {isNew24h ? (
-        <span className="pointer-events-none absolute right-3 top-1 z-10 rounded-full border border-white/30 bg-white/10 px-2 py-1 text-[9px] uppercase tracking-[0.4em] text-white">
-          Novo
-        </span>
+        <>
+          <span className="sr-only">Imóvel novo nas últimas 24 horas</span>
+          <span
+            aria-hidden="true"
+            className="
+              pointer-events-none absolute -right-2 -top-2 z-20
+              flex h-6 w-6 items-center justify-center rounded-full
+              border border-emerald-300/40 bg-emerald-500/90
+              text-[1px] font-semibold uppercase tracking-[0.10em] text-emerald-50
+              shadow-[0_0_12px_rgba(16,185,129,0.28)]
+              backdrop-blur
+              sm:h-7 sm:w-7 sm:text-[6.5px]
+            "
+          >
+            Novo
+          </span>
+        </>
       ) : null}
+      <motion.div
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
+        style={
+          shouldReduceMotion
+            ? undefined
+            : { rotateX, rotateY, transformStyle: "preserve-3d" }
+        }
+        className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-white/5 p-5 shadow-glow backdrop-blur-md transition-colors duration-150 focus-within:border-white/40"
+        whileHover={shouldReduceMotion ? undefined : { scale: 1.01 }}
+        transition={{ duration: 0.15, ease: "easeOut" }}
+      >
       <div className="flex items-center justify-between text-xs text-zinc-500">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
           <span className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-zinc-300">
             {portalLabel}
           </span>
         </div>
-        <span>{formatDate(listing.first_seen_at)}</span>
+        <span className="shrink-0">{formatDate(listing.first_seen_at)}</span>
       </div>
 
       {listing.url ? (
@@ -136,11 +152,15 @@ export default function ListingCard({ listing }: ListingCardProps) {
           className="group mt-4 block cursor-pointer overflow-hidden rounded-xl border border-zinc-800 bg-black/60 transition hover:border-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
         >
           {listing.main_image_url ? (
-            <img
-              src={listing.main_image_url}
-              alt={listing.title ?? "Listing"}
-              className="h-40 w-full object-cover transition duration-200 group-hover:scale-[1.01]"
-            />
+            <div className="relative h-40 w-full">
+              <Image
+                src={listing.main_image_url}
+                alt={listing.title ?? "Listing"}
+                fill
+                sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
+                className="object-cover transition duration-200 group-hover:scale-[1.01]"
+              />
+            </div>
           ) : (
             <div className="flex h-40 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">
               Sem imagem
@@ -150,11 +170,15 @@ export default function ListingCard({ listing }: ListingCardProps) {
       ) : (
         <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800 bg-black/60">
           {listing.main_image_url ? (
-            <img
-              src={listing.main_image_url}
-              alt={listing.title ?? "Listing"}
-              className="h-40 w-full object-cover"
-            />
+            <div className="relative h-40 w-full">
+              <Image
+                src={listing.main_image_url}
+                alt={listing.title ?? "Listing"}
+                fill
+                sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
+                className="object-cover"
+              />
+            </div>
           ) : (
             <div className="flex h-40 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">
               Sem imagem
@@ -202,6 +226,7 @@ export default function ListingCard({ listing }: ListingCardProps) {
           <span>Sem link</span>
         )}
       </div>
-    </motion.div>
+      </motion.div>
+    </div>
   );
 }
