@@ -29,6 +29,9 @@ type ClientFilter = {
   max_price: number | null;
   neighborhoods: string[];
   min_bedrooms: number | null;
+  min_bathrooms?: number | null;
+  min_parking?: number | null;
+  min_area_m2?: number | null;
   max_days_fresh: number | null;
   property_types: string[];
 };
@@ -39,6 +42,10 @@ type Listing = {
   price: number | null;
   neighborhood: string | null;
   bedrooms: number | null;
+  bathrooms: number | null;
+  parking: number | null;
+  area_m2: number | null;
+  property_type: "apartment" | "house" | "other" | "land" | null;
   url: string | null;
   main_image_url: string | null;
 };
@@ -63,6 +70,16 @@ const PIPELINE_STEPS = [
   { value: "proposta", label: "Proposta" },
   { value: "fechado", label: "Fechado" }
 ] as const;
+const PROPERTY_TYPE_OPTIONS = [
+  { value: "apartment", label: "apartment" },
+  { value: "house", label: "house" },
+  { value: "other", label: "other" },
+  { value: "land", label: "land" }
+] as const;
+type PropertyTypeValue = (typeof PROPERTY_TYPE_OPTIONS)[number]["value"];
+const PROPERTY_TYPE_SET = new Set<PropertyTypeValue>(
+  PROPERTY_TYPE_OPTIONS.map((option) => option.value)
+);
 
 const formatCurrency = (value: number | null) => {
   if (value === null || Number.isNaN(value)) return "—";
@@ -96,6 +113,42 @@ const toArray = (value: string) =>
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+
+const toPropertyTypeValues = (value: string) => {
+  const unique = new Set<PropertyTypeValue>();
+  toArray(value).forEach((item) => {
+    const candidate = item.toLowerCase() as PropertyTypeValue;
+    if (PROPERTY_TYPE_SET.has(candidate)) {
+      unique.add(candidate);
+    }
+  });
+  return Array.from(unique);
+};
+
+const parseMinFilter = (value?: number | null) =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+
+const parseMinInput = (value: string) => {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
+
+const passesMinOrZero = (
+  listingValue: number | null | undefined,
+  minValue: number | null
+) => {
+  if (minValue === null) return true;
+  if (typeof listingValue !== "number" || !Number.isFinite(listingValue)) {
+    return true;
+  }
+  return listingValue === 0 || listingValue >= minValue;
+};
+
+const isMissingColumnError = (errorMessage?: string) =>
+  typeof errorMessage === "string" && /column .* does not exist/i.test(errorMessage);
 
 const truncateWords = (value: string, maxWords: number) => {
   const words = value.trim().split(/\s+/).filter(Boolean);
@@ -149,6 +202,9 @@ export default function CrmPage() {
     max_price: "",
     neighborhoods: "",
     min_bedrooms: "",
+    min_bathrooms: "",
+    min_parking: "",
+    min_area_m2: "",
     max_days_fresh: "7",
     property_types: ""
   });
@@ -188,12 +244,20 @@ export default function CrmPage() {
   const processingQueueRef = useRef(false);
   const lastViewedAtRef = useRef<Record<string, string>>({});
   const matchIdsRef = useRef<Set<string>>(new Set());
+  const listingRulesRef = useRef({
+    isWithinPriceRange: (_listing?: Listing | null) => true,
+    isWithinListingRules: (_listing?: Listing | null) => true
+  });
 
   const selectedClient =
     clients.find((client) => client.id === selectedClientId) ?? null;
   const selectedNeighborhoods = useMemo(
     () => toArray(filterDraft.neighborhoods),
     [filterDraft.neighborhoods]
+  );
+  const selectedPropertyTypes = useMemo(
+    () => toPropertyTypeValues(filterDraft.property_types),
+    [filterDraft.property_types]
   );
 
   const setNeighborhoodList = (nextValues: string[]) => {
@@ -222,6 +286,21 @@ export default function CrmPage() {
         (item) => normalizeText(item) !== normalizedName
       )
     );
+  };
+
+  const setPropertyTypeList = (nextValues: PropertyTypeValue[]) => {
+    setFilterDraft((prev) => ({
+      ...prev,
+      property_types: nextValues.join(", ")
+    }));
+  };
+
+  const togglePropertyType = (value: PropertyTypeValue) => {
+    if (selectedPropertyTypes.includes(value)) {
+      setPropertyTypeList(selectedPropertyTypes.filter((item) => item !== value));
+      return;
+    }
+    setPropertyTypeList([...selectedPropertyTypes, value]);
   };
 
   const resetDraftFromClient = (client: Client | null) => {
@@ -261,6 +340,39 @@ export default function CrmPage() {
     return { min, max };
   };
 
+  const getListingFilters = (override?: ClientFilter | null) => {
+    const minBedrooms =
+      typeof override?.min_bedrooms === "number"
+        ? parseMinFilter(override.min_bedrooms)
+        : parseMinInput(filterDraft.min_bedrooms);
+    const minBathrooms =
+      typeof override?.min_bathrooms === "number"
+        ? parseMinFilter(override.min_bathrooms)
+        : parseMinInput(filterDraft.min_bathrooms);
+    const minParking =
+      typeof override?.min_parking === "number"
+        ? parseMinFilter(override.min_parking)
+        : parseMinInput(filterDraft.min_parking);
+    const minAreaM2 =
+      typeof override?.min_area_m2 === "number"
+        ? parseMinFilter(override.min_area_m2)
+        : parseMinInput(filterDraft.min_area_m2);
+    const propertyTypes = Array.isArray(override?.property_types)
+      ? override.property_types.filter(
+          (item): item is PropertyTypeValue =>
+            PROPERTY_TYPE_SET.has(item as PropertyTypeValue)
+        )
+      : selectedPropertyTypes;
+
+    return {
+      minBedrooms,
+      minBathrooms,
+      minParking,
+      minAreaM2,
+      propertyTypes
+    };
+  };
+
   const isWithinPriceRange = (
     listing?: Listing | null,
     override?: ClientFilter | null
@@ -279,6 +391,40 @@ export default function CrmPage() {
       const price = row.listing?.price;
       return typeof price === "number" && price >= min && price <= max;
     });
+  };
+
+  const isWithinListingRules = (
+    listing?: Listing | null,
+    override?: ClientFilter | null
+  ) => {
+    if (!listing) return true;
+
+    const { minBedrooms, minBathrooms, minParking, minAreaM2, propertyTypes } =
+      getListingFilters(override);
+
+    if (propertyTypes.length > 0) {
+      const listingType = listing.property_type ?? "";
+      if (!propertyTypes.includes(listingType as PropertyTypeValue)) {
+        return false;
+      }
+    }
+
+    const isLand = listing.property_type === "land";
+    if (!isLand && !passesMinOrZero(listing.bedrooms, minBedrooms)) return false;
+    if (!isLand && !passesMinOrZero(listing.bathrooms, minBathrooms)) return false;
+    if (!isLand && !passesMinOrZero(listing.parking, minParking)) return false;
+    if (!passesMinOrZero(listing.area_m2, minAreaM2)) return false;
+
+    return true;
+  };
+
+  const filterMatchesByDraft = (rows: Match[], override?: ClientFilter | null) =>
+    filterByPriceRange(rows, override).filter((row) =>
+      isWithinListingRules(row.listing, override)
+    );
+  listingRulesRef.current = {
+    isWithinPriceRange,
+    isWithinListingRules
   };
 
   const updateClientAlert = (clientId: string, delta: number) => {
@@ -347,7 +493,9 @@ export default function CrmPage() {
     const ids = Array.from(new Set(missing.map((row) => row.listing_id)));
     const { data, error } = await supabase
       .from("listings")
-      .select("id, title, price, neighborhood, bedrooms, url, main_image_url")
+      .select(
+        "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url"
+      )
       .in("id", ids);
 
     if (error) {
@@ -471,13 +619,26 @@ export default function CrmPage() {
 
   const fetchFilter = async (clientId: string) => {
     setFilterError(null);
-    const { data, error } = await supabase
+    const selectWithExtendedColumns =
+      "id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_days_fresh, property_types";
+    const selectBaseColumns =
+      "id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, max_days_fresh, property_types";
+
+    let { data, error } = await supabase
       .from("client_filters")
-      .select(
-        "id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, max_days_fresh, property_types"
-      )
+      .select(selectWithExtendedColumns)
       .eq("client_id", clientId)
       .maybeSingle();
+
+    if (error && isMissingColumnError(error.message)) {
+      const fallback = await supabase
+        .from("client_filters")
+        .select(selectBaseColumns)
+        .eq("client_id", clientId)
+        .maybeSingle();
+      data = fallback.data;
+      error = fallback.error;
+    }
 
     if (error) {
       setFilterError(error.message);
@@ -500,9 +661,14 @@ export default function CrmPage() {
         ? filter?.neighborhoods.join(", ")
         : "",
       min_bedrooms: filter?.min_bedrooms?.toString() ?? "",
+      min_bathrooms: filter?.min_bathrooms?.toString() ?? "",
+      min_parking: filter?.min_parking?.toString() ?? "",
+      min_area_m2: filter?.min_area_m2?.toString() ?? "",
       max_days_fresh: filter?.max_days_fresh?.toString() ?? "7",
       property_types: Array.isArray(filter?.property_types)
-        ? filter?.property_types.join(", ")
+        ? filter?.property_types
+            .filter((item) => PROPERTY_TYPE_SET.has(item as PropertyTypeValue))
+            .join(", ")
         : ""
     });
     setNeighborhoodInput("");
@@ -521,7 +687,7 @@ export default function CrmPage() {
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, url, main_image_url)"
+        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url)"
       )
       .eq("client_id", clientId)
       .eq("seen", false)
@@ -536,7 +702,7 @@ export default function CrmPage() {
         ((data as unknown as Match[]) ?? []).map((row) => ({ ...row })),
         "pendentes"
       );
-      const filtered = filterByPriceRange(rows, filterOverride);
+      const filtered = filterMatchesByDraft(rows, filterOverride);
       setMatches((prev) => (page === 0 ? filtered : [...prev, ...filtered]));
       setMatchesHasMore(filtered.length === pageSize);
     }
@@ -555,7 +721,7 @@ export default function CrmPage() {
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, url, main_image_url)"
+        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url)"
       )
       .eq("client_id", clientId)
       .eq("seen", true)
@@ -571,7 +737,7 @@ export default function CrmPage() {
         ((data as unknown as Match[]) ?? []).map((row) => ({ ...row })),
         "curadoria"
       );
-      const filtered = filterByPriceRange(rows, filterOverride);
+      const filtered = filterMatchesByDraft(rows, filterOverride);
       setHistory((prev) => (page === 0 ? filtered : [...prev, ...filtered]));
       setHistoryHasMore(filtered.length === pageSize);
     }
@@ -590,7 +756,7 @@ export default function CrmPage() {
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, url, main_image_url)"
+        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url)"
       )
       .eq("client_id", clientId)
       .eq("seen", true)
@@ -606,7 +772,7 @@ export default function CrmPage() {
         ((data as unknown as Match[]) ?? []).map((row) => ({ ...row })),
         "arquivados"
       );
-      const filtered = filterByPriceRange(rows, filterOverride);
+      const filtered = filterMatchesByDraft(rows, filterOverride);
       setArchived((prev) => (page === 0 ? filtered : [...prev, ...filtered]));
       setArchivedHasMore(filtered.length === pageSize);
     }
@@ -685,7 +851,7 @@ export default function CrmPage() {
           const { data: listing, error: listingError } = await supabase
             .from("listings")
             .select(
-              "id, title, price, neighborhood, bedrooms, url, main_image_url"
+              "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url"
             )
             .eq("id", newMatch.listing_id)
             .maybeSingle();
@@ -699,7 +865,10 @@ export default function CrmPage() {
             listing: (listing as Listing | null) ?? null
           };
 
-          if (!isWithinPriceRange(enriched.listing)) {
+          if (
+            !listingRulesRef.current.isWithinPriceRange(enriched.listing) ||
+            !listingRulesRef.current.isWithinListingRules(enriched.listing)
+          ) {
             return;
           }
 
@@ -819,26 +988,41 @@ export default function CrmPage() {
     setFilterError(null);
 
     const neighborhoods = selectedNeighborhoods;
-    const propertyTypes = toArray(filterDraft.property_types);
+    const propertyTypes = selectedPropertyTypes;
+    const minBedrooms = parseMinInput(filterDraft.min_bedrooms);
+    const minBathrooms = parseMinInput(filterDraft.min_bathrooms);
+    const minParking = parseMinInput(filterDraft.min_parking);
+    const minAreaM2 = parseMinInput(filterDraft.min_area_m2);
 
-    const payload: ClientFilter = {
+    const basePayload: ClientFilter = {
       client_id: selectedClientId,
       active: filterDraft.active,
       min_price: parseBRNumber(filterDraft.min_price),
       max_price: parseBRNumber(filterDraft.max_price),
       neighborhoods,
-      min_bedrooms: filterDraft.min_bedrooms
-        ? Number(filterDraft.min_bedrooms)
-        : null,
+      min_bedrooms: minBedrooms,
       max_days_fresh: filterDraft.max_days_fresh
         ? Number(filterDraft.max_days_fresh)
         : null,
       property_types: propertyTypes
     };
+    const extendedPayload: ClientFilter = {
+      ...basePayload,
+      min_bathrooms: minBathrooms,
+      min_parking: minParking,
+      min_area_m2: minAreaM2
+    };
 
-    const { error } = await supabase
+    let { error } = await supabase
       .from("client_filters")
-      .upsert(payload, { onConflict: "client_id" });
+      .upsert(extendedPayload, { onConflict: "client_id" });
+
+    if (error && isMissingColumnError(error.message)) {
+      const fallback = await supabase
+        .from("client_filters")
+        .upsert(basePayload, { onConflict: "client_id" });
+      error = fallback.error;
+    }
 
     if (error) {
       setFilterError(error.message);
@@ -1321,6 +1505,7 @@ export default function CrmPage() {
               <div className="grid gap-3 md:grid-cols-2">
                 <Input
                   type="number"
+                  min={0}
                   placeholder="Quartos mín."
                   value={filterDraft.min_bedrooms}
                   onChange={(event) =>
@@ -1332,6 +1517,43 @@ export default function CrmPage() {
                 />
                 <Input
                   type="number"
+                  min={0}
+                  placeholder="Banheiros mín."
+                  value={filterDraft.min_bathrooms}
+                  onChange={(event) =>
+                    setFilterDraft((prev) => ({
+                      ...prev,
+                      min_bathrooms: event.target.value
+                    }))
+                  }
+                />
+                <Input
+                  type="number"
+                  min={0}
+                  placeholder="Vagas mín."
+                  value={filterDraft.min_parking}
+                  onChange={(event) =>
+                    setFilterDraft((prev) => ({
+                      ...prev,
+                      min_parking: event.target.value
+                    }))
+                  }
+                />
+                <Input
+                  type="number"
+                  min={0}
+                  placeholder="Área mín. (m2)"
+                  value={filterDraft.min_area_m2}
+                  onChange={(event) =>
+                    setFilterDraft((prev) => ({
+                      ...prev,
+                      min_area_m2: event.target.value
+                    }))
+                  }
+                />
+                <Input
+                  type="number"
+                  min={1}
                   placeholder="Dias frescos"
                   value={filterDraft.max_days_fresh}
                   onChange={(event) =>
@@ -1343,16 +1565,29 @@ export default function CrmPage() {
                 />
               </div>
 
-              <Input
-                placeholder="Tipos (apto, casa, studio)"
-                value={filterDraft.property_types}
-                onChange={(event) =>
-                  setFilterDraft((prev) => ({
-                    ...prev,
-                    property_types: event.target.value
-                  }))
-                }
-              />
+              <div className="space-y-2">
+                <p className="text-xs text-zinc-500">Tipo de imóvel</p>
+                <div className="flex flex-wrap gap-2">
+                  {PROPERTY_TYPE_OPTIONS.map((option) => {
+                    const selected = selectedPropertyTypes.includes(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => togglePropertyType(option.value)}
+                        className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 ${
+                          selected
+                            ? "border-zinc-200 bg-zinc-100 text-zinc-900"
+                            : "border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100"
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               <Button
                 onClick={handleSaveFilters}

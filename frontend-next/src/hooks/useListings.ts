@@ -10,6 +10,10 @@ export type ListingsFilters = {
   minPrice?: number;
   maxPrice?: number;
   minBedrooms?: number;
+  minBathrooms?: number;
+  minParking?: number;
+  minAreaM2?: number;
+  propertyType?: "apartment" | "house" | "other" | "land";
   portal?: string;
   sort?: "date_desc" | "date_asc" | "price_asc" | "price_desc";
 };
@@ -26,6 +30,7 @@ export type Listing = {
   bathrooms: number | null;
   parking: number | null;
   area_m2: number | null;
+  property_type: "apartment" | "house" | "other" | "land" | null;
   portal: string | null;
   first_seen_at: string | null;
   scraped_at?: string | null;
@@ -57,6 +62,11 @@ function useDebouncedValue<T>(value: T, delayMs: number) {
 
   return debounced;
 }
+
+const parseMinFilter = (value?: number) =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
 
 export function useListings(
   initialFilters: ListingsFilters = { maxDaysFresh: 15 }
@@ -96,7 +106,7 @@ export function useListings(
       let query = supabase
         .from("listings")
         .select(
-          "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, portal, first_seen_at, scraped_at, last_seen_at, main_image_url, url",
+          "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, portal, first_seen_at, scraped_at, last_seen_at, main_image_url, url",
           { count: "exact" }
         )
         .gte("first_seen_at", cutoffDate)
@@ -113,6 +123,10 @@ export function useListings(
         query = query.eq("portal", debouncedFilters.portal);
       }
 
+      if (debouncedFilters.propertyType) {
+        query = query.eq("property_type", debouncedFilters.propertyType);
+      }
+
       if (typeof debouncedFilters.minPrice === "number") {
         query = query.gte("price", debouncedFilters.minPrice);
       }
@@ -121,8 +135,25 @@ export function useListings(
         query = query.lte("price", debouncedFilters.maxPrice);
       }
 
-      if (typeof debouncedFilters.minBedrooms === "number") {
-        query = query.gte("bedrooms", debouncedFilters.minBedrooms);
+      const minBedrooms = parseMinFilter(debouncedFilters.minBedrooms);
+      if (minBedrooms !== null) {
+        // Regra temporaria: inclui dados zerados para nao perder anuncios.
+        query = query.or(`bedrooms.gte.${minBedrooms},bedrooms.eq.0`);
+      }
+
+      const minBathrooms = parseMinFilter(debouncedFilters.minBathrooms);
+      if (minBathrooms !== null) {
+        query = query.or(`bathrooms.gte.${minBathrooms},bathrooms.eq.0`);
+      }
+
+      const minParking = parseMinFilter(debouncedFilters.minParking);
+      if (minParking !== null) {
+        query = query.or(`parking.gte.${minParking},parking.eq.0`);
+      }
+
+      const minAreaM2 = parseMinFilter(debouncedFilters.minAreaM2);
+      if (minAreaM2 !== null) {
+        query = query.or(`area_m2.gte.${minAreaM2},area_m2.eq.0`);
       }
 
       const sort = debouncedFilters.sort ?? "date_desc";

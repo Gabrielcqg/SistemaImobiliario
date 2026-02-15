@@ -127,19 +127,41 @@ export default function ListingCard({ listing }: ListingCardProps) {
         <span>{formatDate(listing.first_seen_at)}</span>
       </div>
 
-      <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800 bg-black/60">
-        {listing.main_image_url ? (
-          <img
-            src={listing.main_image_url}
-            alt={listing.title ?? "Listing"}
-            className="h-40 w-full object-cover"
-          />
-        ) : (
-          <div className="flex h-40 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">
-            Sem imagem
-          </div>
-        )}
-      </div>
+      {listing.url ? (
+        <a
+          href={listing.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Abrir anuncio: ${listing.title ?? "imovel"}`}
+          className="group mt-4 block cursor-pointer overflow-hidden rounded-xl border border-zinc-800 bg-black/60 transition hover:border-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+        >
+          {listing.main_image_url ? (
+            <img
+              src={listing.main_image_url}
+              alt={listing.title ?? "Listing"}
+              className="h-40 w-full object-cover transition duration-200 group-hover:scale-[1.01]"
+            />
+          ) : (
+            <div className="flex h-40 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">
+              Sem imagem
+            </div>
+          )}
+        </a>
+      ) : (
+        <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800 bg-black/60">
+          {listing.main_image_url ? (
+            <img
+              src={listing.main_image_url}
+              alt={listing.title ?? "Listing"}
+              className="h-40 w-full object-cover"
+            />
+          ) : (
+            <div className="flex h-40 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">
+              Sem imagem
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="mt-4">
         <p className="text-base font-semibold" title={fullTitle}>
@@ -171,7 +193,7 @@ export default function ListingCard({ listing }: ListingCardProps) {
           <a
             href={listing.url}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="underline underline-offset-4"
           >
             Abrir anúncio
