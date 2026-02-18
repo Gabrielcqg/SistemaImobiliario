@@ -46,6 +46,7 @@ type NextActionValue =
 type Client = {
   id: string;
   org_id?: string | null;
+  owner_user_id?: string | null;
   user_id: string;
   name: string;
   contact_info: { email?: string; phone?: string } | null;
@@ -587,6 +588,31 @@ export default function CrmPage() {
     [filterDraft.property_types]
   );
 
+  const getAuthenticatedUserId = useCallback(async () => {
+    const {
+      data: { user },
+      error
+    } = await supabase.auth.getUser();
+
+    if (error || !user) {
+      const message = error?.message ?? "Usuário não autenticado.";
+      console.error("Erro ao obter usuário autenticado:", error ?? message);
+      return null;
+    }
+
+    return user.id;
+  }, [supabase]);
+
+  const isClientOwnedByUser = useCallback(
+    (clientId: string, userId: string) =>
+      clients.some((client) => {
+        if (client.id !== clientId) return false;
+        const ownerId = client.owner_user_id ?? client.user_id;
+        return ownerId === userId;
+      }),
+    [clients]
+  );
+
   const clearPipelineAnimationTimer = useCallback(() => {
     if (!pipelineAnimationTimerRef.current) return;
     clearTimeout(pipelineAnimationTimerRef.current);
@@ -921,17 +947,62 @@ export default function CrmPage() {
     });
   };
 
-  const fetchClientAlerts = async () => {
+  const fetchClientAlerts = async (ownerUserIdArg?: string) => {
     if (!organizationId) {
       setClientAlerts({});
       return;
     }
 
+    const ownerUserId = ownerUserIdArg ?? (await getAuthenticatedUserId());
+    if (!ownerUserId) {
+      setAlertsError("Usuário não autenticado para carregar alertas.");
+      setClientAlerts({});
+      return;
+    }
+
     setAlertsError(null);
+    const ownerScopedClients = await supabase
+      .from("clients")
+      .select("id")
+      .eq("org_id", organizationId)
+      .eq("owner_user_id", ownerUserId);
+
+    let ownedClientRows =
+      (ownerScopedClients.data as { id: string }[] | null) ?? [];
+    let ownerScopedClientsError = ownerScopedClients.error;
+
+    if (
+      ownerScopedClientsError &&
+      isMissingColumnError(ownerScopedClientsError.message)
+    ) {
+      const legacyScopedClients = await supabase
+        .from("clients")
+        .select("id")
+        .eq("org_id", organizationId)
+        .eq("user_id", ownerUserId);
+      ownedClientRows =
+        (legacyScopedClients.data as { id: string }[] | null) ?? [];
+      ownerScopedClientsError = legacyScopedClients.error;
+    }
+
+    if (ownerScopedClientsError) {
+      setAlertsError(ownerScopedClientsError.message);
+      setClientAlerts({});
+      console.error("Erro ao carregar clientes do usuário para alertas:", ownerScopedClientsError);
+      return;
+    }
+
+    const ownedClientIds = ownedClientRows.map((row) => row.id);
+    if (ownedClientIds.length === 0) {
+      setClientAlerts({});
+      return;
+    }
+
     const { data, error } = await supabase
       .from("automated_matches")
       .select("client_id")
       .eq("org_id", organizationId)
+      .in("client_id", ownedClientIds)
       .eq("seen", false);
 
     if (error) {
@@ -1039,26 +1110,48 @@ export default function CrmPage() {
       return;
     }
 
+    const ownerUserId = await getAuthenticatedUserId();
+    if (!ownerUserId) {
+      setClientError("Usuário não autenticado para carregar clientes.");
+      setClients([]);
+      setSelectedClientId(null);
+      return;
+    }
+
     setClientError(null);
-    const selectWithPipelineMetadata =
-      "id, org_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, closed_outcome, lost_reason, lost_reason_detail, next_action, next_followup_at, visit_at, visit_notes, proposal_value, proposal_valid_until, last_status_change_at, created_at";
-    const selectLegacyColumns =
+    const selectOwnerScopedWithPipelineMetadata =
+      "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, closed_outcome, lost_reason, lost_reason_detail, next_action, next_followup_at, visit_at, visit_notes, proposal_value, proposal_valid_until, last_status_change_at, created_at";
+    const selectOwnerScopedLegacyColumns =
+      "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at";
+    const selectLegacyWithoutOwnerColumn =
       "id, org_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at";
 
     const primary = await supabase
       .from("clients")
-      .select(selectWithPipelineMetadata)
-      .eq("org_id", organizationId);
+      .select(selectOwnerScopedWithPipelineMetadata)
+      .eq("org_id", organizationId)
+      .eq("owner_user_id", ownerUserId);
     let data = (primary.data as Client[] | null) ?? null;
     let error = primary.error;
 
     if (error && isMissingColumnError(error.message)) {
       const fallback = await supabase
         .from("clients")
-        .select(selectLegacyColumns)
-        .eq("org_id", organizationId);
+        .select(selectOwnerScopedLegacyColumns)
+        .eq("org_id", organizationId)
+        .eq("owner_user_id", ownerUserId);
       data = (fallback.data as Client[] | null) ?? null;
       error = fallback.error;
+    }
+
+    if (error && isMissingColumnError(error.message)) {
+      const legacyOwnerFallback = await supabase
+        .from("clients")
+        .select(selectLegacyWithoutOwnerColumn)
+        .eq("org_id", organizationId)
+        .eq("user_id", ownerUserId);
+      data = (legacyOwnerFallback.data as Client[] | null) ?? null;
+      error = legacyOwnerFallback.error;
     }
 
     if (error) {
@@ -1067,7 +1160,10 @@ export default function CrmPage() {
       return;
     }
 
-    const rows = (data as Client[]) ?? [];
+    const rows = ((data as Client[]) ?? []).map((client) => ({
+      ...client,
+      owner_user_id: client.owner_user_id ?? client.user_id
+    }));
     const today = new Date();
     const sorted = [...rows].sort((a, b) => {
       const dateA = parseDateSafe(a.data_retorno);
@@ -1087,7 +1183,7 @@ export default function CrmPage() {
     });
 
     setClients(sorted);
-    fetchClientAlerts();
+    await fetchClientAlerts(ownerUserId);
 
     if (sorted.length === 0) {
       setIsCreatingClient(true);
@@ -1110,6 +1206,21 @@ export default function CrmPage() {
 
   const fetchTimeline = async (clientId: string) => {
     if (!organizationId) {
+      setTimelineEvents([]);
+      setTimelineLoading(false);
+      return;
+    }
+
+    const ownerUserId = await getAuthenticatedUserId();
+    if (!ownerUserId) {
+      setTimelineError("Usuário não autenticado para carregar timeline.");
+      setTimelineEvents([]);
+      setTimelineLoading(false);
+      return;
+    }
+
+    if (!isClientOwnedByUser(clientId, ownerUserId)) {
+      setTimelineError("Cliente fora do escopo do usuário logado.");
       setTimelineEvents([]);
       setTimelineLoading(false);
       return;
@@ -1237,6 +1348,16 @@ export default function CrmPage() {
       return;
     }
 
+    const ownerUserId = await getAuthenticatedUserId();
+    if (!ownerUserId) {
+      setStatusModalError("Usuário não autenticado para atualizar o pipeline.");
+      return;
+    }
+    if (!isClientOwnedByUser(selectedClientId, ownerUserId)) {
+      setStatusModalError("Você não tem acesso para atualizar este cliente.");
+      return;
+    }
+
     if (!transitionDraft.next_action) {
       setStatusModalError("Selecione a próxima ação.");
       return;
@@ -1339,11 +1460,22 @@ export default function CrmPage() {
     setStatusModalError(null);
     setClientError(null);
 
-    const { error: updateError } = await supabase
+    let { error: updateError } = await supabase
       .from("clients")
       .update(updatePayload)
       .eq("id", selectedClientId)
-      .eq("org_id", organizationId);
+      .eq("org_id", organizationId)
+      .eq("owner_user_id", ownerUserId);
+
+    if (updateError && isMissingColumnError(updateError.message)) {
+      const fallback = await supabase
+        .from("clients")
+        .update(updatePayload)
+        .eq("id", selectedClientId)
+        .eq("org_id", organizationId)
+        .eq("user_id", ownerUserId);
+      updateError = fallback.error;
+    }
 
     if (updateError) {
       setStatusModalSaving(false);
@@ -1802,15 +1934,11 @@ export default function CrmPage() {
     }
 
     if (isCreatingClient) {
-      const {
-        data: { user },
-        error: userError
-      } = await supabase.auth.getUser();
+      const ownerUserId = await getAuthenticatedUserId();
 
-      if (userError || !user) {
-        const message = userError?.message ?? "Usuário não autenticado.";
+      if (!ownerUserId) {
+        const message = "Usuário não autenticado.";
         setClientError(message);
-        console.error("Erro ao obter usuário:", userError);
         setClientSaving(false);
         return;
       }
@@ -1819,7 +1947,8 @@ export default function CrmPage() {
         .from("clients")
         .insert({
           org_id: organizationId,
-          user_id: user.id,
+          owner_user_id: ownerUserId,
+          user_id: ownerUserId,
           name: trimmedName,
           contact_info: {
             email: clientDraft.email?.trim() || null,
@@ -1830,7 +1959,7 @@ export default function CrmPage() {
           status_pipeline: clientDraft.status_pipeline || null
         })
         .select(
-          "id, org_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at"
+          "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at"
         )
         .single();
 
@@ -1847,7 +1976,19 @@ export default function CrmPage() {
         await fetchClients((data as Client).id);
       }
     } else if (selectedClientId) {
-      const { error } = await supabase
+      const ownerUserId = await getAuthenticatedUserId();
+      if (!ownerUserId) {
+        setClientError("Usuário não autenticado para atualizar cliente.");
+        setClientSaving(false);
+        return;
+      }
+      if (!isClientOwnedByUser(selectedClientId, ownerUserId)) {
+        setClientError("Você não tem acesso para atualizar este cliente.");
+        setClientSaving(false);
+        return;
+      }
+
+      let { error } = await supabase
         .from("clients")
         .update({
           name: trimmedName,
@@ -1860,7 +2001,27 @@ export default function CrmPage() {
           status_pipeline: clientDraft.status_pipeline || null
         })
         .eq("id", selectedClientId)
-        .eq("org_id", organizationId);
+        .eq("org_id", organizationId)
+        .eq("owner_user_id", ownerUserId);
+
+      if (error && isMissingColumnError(error.message)) {
+        const fallback = await supabase
+          .from("clients")
+          .update({
+            name: trimmedName,
+            contact_info: {
+              email: clientDraft.email?.trim() || null,
+              phone: clientDraft.phone?.trim() || null
+            },
+            data_retorno: clientDraft.data_retorno || null,
+            descricao_contexto: clientDraft.descricao_contexto || null,
+            status_pipeline: clientDraft.status_pipeline || null
+          })
+          .eq("id", selectedClientId)
+          .eq("org_id", organizationId)
+          .eq("user_id", ownerUserId);
+        error = fallback.error;
+      }
 
       if (error) {
         setClientError(error.message);
@@ -2238,15 +2399,35 @@ export default function CrmPage() {
 
   const handleRemoveClient = async () => {
     if (!selectedClientId || !organizationId) return;
+    const ownerUserId = await getAuthenticatedUserId();
+    if (!ownerUserId) {
+      setClientError("Usuário não autenticado para remover cliente.");
+      return;
+    }
+    if (!isClientOwnedByUser(selectedClientId, ownerUserId)) {
+      setClientError("Você não tem acesso para remover este cliente.");
+      return;
+    }
     const confirmDelete = window.confirm(
       "Tem certeza que deseja remover este client? Essa ação não pode ser desfeita."
     );
     if (!confirmDelete) return;
-    const { error } = await supabase
+    let { error } = await supabase
       .from("clients")
       .delete()
       .eq("id", selectedClientId)
-      .eq("org_id", organizationId);
+      .eq("org_id", organizationId)
+      .eq("owner_user_id", ownerUserId);
+
+    if (error && isMissingColumnError(error.message)) {
+      const fallback = await supabase
+        .from("clients")
+        .delete()
+        .eq("id", selectedClientId)
+        .eq("org_id", organizationId)
+        .eq("user_id", ownerUserId);
+      error = fallback.error;
+    }
 
     if (error) {
       setClientError(error.message);

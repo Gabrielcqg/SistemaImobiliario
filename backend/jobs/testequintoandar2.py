@@ -441,33 +441,6 @@ async def extract_card_data(card_element, api_by_id: dict) -> dict:
     # -------------------------------------------
     src_id = str(src.get("id") or ext_id)
 
-    # ==============================================================================
-    # 🕵️‍♂️ DEBUG ESPECIAL: Imóvel 894156478 (ATUALIZADO)
-    # ==============================================================================
-    if src_id == "894156478":
-        print("\n" + "="*60)
-        print(f"🚨 IMÓVEL ALVO ENCONTRADO: {src_id}")
-        raw_sale = src.get("salePrice")
-        raw_rent = src.get("rent")
-        raw_cover = src.get("coverImage")
-        
-        print(f"   1. JSON Raw salePrice...: {raw_sale} (Tipo: {type(raw_sale)})")
-        print(f"   2. JSON Raw rent........: {raw_rent}")
-        print(f"   3. JSON Raw coverImage..: '{raw_cover}'")
-        
-        price_decidido = float(raw_sale or raw_rent or 0)
-        print(f"   4. Lógica de Preço final: {price_decidido}")
-        
-        url_gerada = _build_quintoandar_image_url(raw_cover)
-        print(f"   5. URL da Imagem Gerada.: '{url_gerada}'")
-        
-        imgs = src.get("imageList") or []
-        print(f"   6. Qtd imagens na lista.: {len(imgs)}")
-        if imgs:
-            print(f"      Primeira da lista....: '{imgs[0]}'")
-        print("="*60 + "\n")
-    # ==============================================================================
-
     raw_pt = (src.get("type") or "")
     property_type = normalize_property_type(raw_pt)
 
@@ -770,15 +743,6 @@ async def save_to_supabase(sb, data):
         out.append(row)
     data = out
     data = drop_published_at_for_existing(sb, data)
-    
-    # 🕵️‍♂️ DEBUG DO ALVO: Verifica se o imóvel 894156478 está neste lote
-    target_in_batch = next((r for r in data if str(r.get("external_id")) == "894156478"), None)
-    if target_in_batch:
-        print("\n" + "⚡"*40)
-        print(f"🚨 TENTANDO SALVAR O IMÓVEL 894156478 AGORA NO SUPABASE!")
-        print(f"   Preço no payload: {target_in_batch.get('price')}")
-        print(f"   Imagem no payload: {target_in_batch.get('main_image_url')}")
-        print("⚡"*40 + "\n")
 
     try:
         response = await upsert_with_retry(sb, data, on_conflict="portal,external_id")
@@ -788,14 +752,6 @@ async def save_to_supabase(sb, data):
             count = len(response.data)
             
         print(f"💾 Salvou lote de {len(data)} imóveis. (Supabase confirmou: {count} registros processados)")
-
-        if target_in_batch and response and response.data:
-            db_confirm = next((r for r in response.data if str(r.get("external_id")) == "894156478"), None)
-            if db_confirm:
-                print(f"✅ CONFIRMADO: O banco devolveu o registro 894156478 atualizado.")
-                print(f"   Preço salvo no banco: {db_confirm.get('price')}")
-            else:
-                print(f"⚠️ AVISO: O registro 894156478 foi enviado, mas NÃO apareceu na confirmação.")
 
         return
 

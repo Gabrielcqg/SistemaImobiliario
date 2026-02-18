@@ -4,21 +4,35 @@ import Link from "next/link";
 import { BarChart3, Search, Users } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { memo, useEffect, useState } from "react";
+import { useOrganizationContext } from "@/lib/auth/useOrganizationContext";
 import { dispatchNavigationStart } from "@/lib/navigation/progress";
 
 const navItems = [
   { label: "Buscador", href: "/buscador", icon: Search },
-  { label: "Analytics", href: "/analytics", icon: BarChart3 },
-  { label: "CRM", href: "/crm", icon: Users }
+  { label: "CRM", href: "/crm", icon: Users },
+  { label: "Analytics", href: "/analytics", icon: BarChart3 }
 ];
 
 function Sidebar() {
   const pathname = usePathname();
+  const { context: organizationContext, loading: organizationLoading } =
+    useOrganizationContext();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
+
+  const canAccessAnalytics =
+    organizationContext?.organization.kind === "individual" ||
+    organizationContext?.role === "owner" ||
+    organizationContext?.role === "admin";
+
+  const renderedNavItems = navItems.filter((item) => {
+    if (item.href !== "/analytics") return true;
+    if (organizationLoading) return false;
+    return Boolean(canAccessAnalytics);
+  });
 
   return (
     <aside className="w-full border-b border-zinc-800 bg-black/80 px-4 py-4 sm:px-6 md:h-screen md:w-64 md:shrink-0 md:overflow-y-auto md:border-b-0 md:border-r md:px-6 md:py-6">
@@ -44,7 +58,7 @@ function Sidebar() {
         id="dashboard-sidebar-nav"
         className={`${mobileOpen ? "mt-4 flex" : "hidden"} min-w-0 flex-col gap-2 md:mt-8 md:flex`}
       >
-        {navItems.map((item) => {
+        {renderedNavItems.map((item) => {
           const isActive = pathname === item.href;
           const Icon = item.icon;
           return (
@@ -74,6 +88,12 @@ function Sidebar() {
             </Link>
           );
         })}
+
+        {organizationLoading ? (
+          <div className="rounded-lg border border-zinc-800 px-3 py-2">
+            <div className="h-4 w-24 animate-pulse rounded bg-zinc-700/70" />
+          </div>
+        ) : null}
       </nav>
     </aside>
   );

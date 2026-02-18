@@ -5,20 +5,20 @@ import SkeletonList from "@/components/ui/SkeletonList";
 export default function AnalyticsLoading() {
   return (
     <PageSkeleton
-      titleWidthClassName="w-32"
+      titleWidthClassName="w-64"
       subtitleWidthClassName="w-80"
-      metaWidthClassName="w-32"
+      metaWidthClassName="w-40"
     >
-      <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
-        <SkeletonCard className="h-[420px]" />
-        <div className="space-y-6">
-          <SkeletonList
-            count={3}
-            className="grid gap-4 md:grid-cols-3"
-            cardClassName="h-32"
-          />
-          <SkeletonCard className="h-80" />
-          <SkeletonCard className="h-64" />
+      <div className="space-y-6">
+        <SkeletonCard className="h-56" />
+        <SkeletonList
+          count={6}
+          className="grid w-full min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4"
+          cardClassName="h-40"
+        />
+        <div className="grid gap-6 xl:grid-cols-2">
+          <SkeletonCard className="h-[420px]" />
+          <SkeletonCard className="h-[420px]" />
         </div>
       </div>
     </PageSkeleton>
