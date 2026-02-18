@@ -14,6 +14,20 @@
   body {
     @apply bg-black text-white antialiased;
   }
+
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: clip;
+  }
+
+  img,
+  svg,
+  video,
+  canvas,
+  iframe {
+    max-width: 100%;
+  }
 }
 
 @layer components {

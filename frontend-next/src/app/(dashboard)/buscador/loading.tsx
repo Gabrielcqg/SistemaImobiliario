@@ -8,8 +8,8 @@ export default function BuscadorLoading() {
         <SkeletonCard className="h-[560px]" />
         <div className="space-y-6">
           <SkeletonCard className="h-14" />
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <SkeletonCard className="h-60 md:col-span-2 xl:col-span-2" />
+          <div className="grid w-full min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <SkeletonCard className="h-60" />
             <SkeletonCard className="h-60" />
             <SkeletonCard className="h-60" />
           </div>

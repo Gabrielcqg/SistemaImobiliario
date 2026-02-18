@@ -8,6 +8,7 @@ import Input from "@/components/ui/Input";
 import SkeletonList from "@/components/ui/SkeletonList";
 import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
 import { useListings, type Listing } from "@/hooks/useListings";
+import { useOrganizationContext } from "@/lib/auth/useOrganizationContext";
 import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
 import { normalizeText } from "@/lib/format/text";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -142,6 +143,13 @@ const matchesMinOrZero = (value: number | null | undefined, min?: number) => {
 export default function BuscadorPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const {
+    context: organizationContext,
+    organizationId,
+    loading: organizationLoading,
+    needsOrganizationChoice,
+    error: organizationError
+  } = useOrganizationContext();
+  const {
     data,
     loading,
     error,
@@ -152,7 +160,13 @@ export default function BuscadorPage() {
     setPage,
     pageSize,
     refetch
-  } = useListings({ maxDaysFresh: 15 });
+  } = useListings(
+    { maxDaysFresh: 15 },
+    {
+      organizationId,
+      organizationReady: !organizationLoading
+    }
+  );
 
   const [minPriceInput, setMinPriceInput] = useState("");
   const [maxPriceInput, setMaxPriceInput] = useState("");
@@ -309,6 +323,10 @@ export default function BuscadorPage() {
   }, []);
 
   const fetchLatestSignal = useCallback(async () => {
+    if (!organizationId) {
+      return { id: null, ts: null };
+    }
+
     const createdSignal = await supabase
       .from("listings")
       .select("id, created_at")
@@ -361,9 +379,17 @@ export default function BuscadorPage() {
       id: row?.id ?? null,
       ts: row?.first_seen_at ?? null
     };
-  }, [supabase]);
+  }, [organizationId, supabase]);
 
   useEffect(() => {
+    if (!organizationId) {
+      pendingGeneralRefreshIdsRef.current = null;
+      lastSignalTsRef.current = null;
+      lastSignalIdRef.current = null;
+      setAutoRefreshFeedback(null);
+      return;
+    }
+
     if (!isGeneralListMode) {
       pendingGeneralRefreshIdsRef.current = null;
       lastSignalTsRef.current = null;
@@ -433,7 +459,7 @@ export default function BuscadorPage() {
       clearIntervalIfNeeded();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [fetchLatestSignal, isGeneralListMode, refetch]);
+  }, [fetchLatestSignal, isGeneralListMode, organizationId, refetch]);
 
   useEffect(() => {
     if (!pendingGeneralRefreshIdsRef.current) return;
@@ -490,6 +516,12 @@ export default function BuscadorPage() {
   }, []);
 
   const fetchRadarData = useCallback(async () => {
+    if (!organizationId) {
+      setRadarListings([]);
+      setRadarLoading(false);
+      return;
+    }
+
     if (!radarEnabled) {
       setRadarLoading(false);
       return;
@@ -590,6 +622,7 @@ export default function BuscadorPage() {
     filters.minParking,
     filters.minAreaM2,
     debouncedNeighborhood,
+    organizationId,
     radarEnabled
   ]);
 
@@ -598,6 +631,10 @@ export default function BuscadorPage() {
   }, [fetchRadarData, radarEnabled]);
 
   useEffect(() => {
+    if (!organizationId) {
+      return;
+    }
+
     if (!radarEnabled) {
       setRealtimeHealthy(true);
       return;
@@ -784,7 +821,7 @@ export default function BuscadorPage() {
       }
       realtimeQueueRef.current = [];
     };
-  }, [supabase, pageSize, radarEnabled]);
+  }, [organizationId, pageSize, radarEnabled, supabase]);
 
   useEffect(() => {
     if (!radarEnabled) return;
@@ -845,9 +882,20 @@ export default function BuscadorPage() {
     return presence;
   }, [radarListings]);
 
+  if (!organizationId && !organizationLoading && !needsOrganizationChoice) {
+    return (
+      <div className="space-y-6">
+        <Card className="border-red-500/40 bg-red-500/10 text-sm text-red-200">
+          {organizationError ??
+            "Nao encontramos uma organizacao ativa para esta conta."}
+        </Card>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-6">
-      <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
+    <div className="min-w-0 space-y-6">
+      <div className="grid min-w-0 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
         <Card className="space-y-6">
           <div>
             <p className="text-[10px] uppercase tracking-[0.4em] text-zinc-500">
@@ -857,6 +905,11 @@ export default function BuscadorPage() {
             <p className="mt-2 text-xs text-zinc-500">
               Alguns anuncios podem vir sem dados completos por enquanto.
             </p>
+            {organizationContext ? (
+              <p className="mt-2 text-[11px] text-zinc-500">
+                Organizacao ativa: {organizationContext.organization.name}
+              </p>
+            ) : null}
           </div>
 
           <div className="space-y-2">
@@ -890,6 +943,7 @@ export default function BuscadorPage() {
               label="Bairro"
               placeholder="Digite o bairro"
               city="Campinas"
+              organizationId={organizationId}
               value={neighborhoodQuery}
               onChange={(nextValue) => {
                 setNeighborhoodQuery(nextValue);
@@ -1111,7 +1165,7 @@ export default function BuscadorPage() {
           </Button>
         </Card>
 
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           <Card className="bg-black/60 px-4 py-3">
             <div className="flex flex-wrap items-center gap-2 md:gap-3">
               <span className="rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-100">
@@ -1151,9 +1205,6 @@ export default function BuscadorPage() {
               </div>
             </div>
           </Card>
-
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          </div>
 
           {radarError ? (
             <Card className="border-red-500/40 bg-red-500/10 text-sm text-red-200">
@@ -1195,9 +1246,11 @@ export default function BuscadorPage() {
           ) : shouldShowListingsSkeleton ? (
             <SkeletonList />
           ) : (
-            <Suspense fallback={<SkeletonList />}>
-              <LazyRadarListingsGrid listings={displayListings} />
-            </Suspense>
+            <div className="w-full min-w-0">
+              <Suspense fallback={<SkeletonList />}>
+                <LazyRadarListingsGrid listings={displayListings} />
+              </Suspense>
+            </div>
           )}
 
           <div className="flex items-center justify-between text-sm text-zinc-500">

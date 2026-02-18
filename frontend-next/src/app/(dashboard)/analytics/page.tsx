@@ -166,7 +166,7 @@ export default function AnalyticsPage() {
   const isEmpty = !loading && metrics.totalCount === 0;
 
   return (
-    <div className="space-y-8">
+    <div className="min-w-0 space-y-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h2 className="text-2xl font-semibold">Analytics</h2>
@@ -179,7 +179,7 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
+      <div className="grid min-w-0 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
         <Card className="space-y-5">
           <div>
             <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
@@ -250,7 +250,7 @@ export default function AnalyticsPage() {
           </Button>
         </Card>
 
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           {error ? (
             <Card className="border-red-500/40 bg-red-500/10 text-red-200">
               {error}

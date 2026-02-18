@@ -3,6 +3,8 @@ import { redirect } from "next/navigation";
 import Sidebar from "@/components/layout/Sidebar";
 import Topbar from "@/components/layout/Topbar";
 import DashboardTransition from "@/components/layout/DashboardTransition";
+import SessionGuard from "@/components/auth/SessionGuard";
+import OrganizationChoiceGuard from "@/components/auth/OrganizationChoiceGuard";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export default async function DashboardLayout({
@@ -19,21 +21,15 @@ export default async function DashboardLayout({
     redirect("/login");
   }
 
-  const { error } = await supabase
-    .from("profiles")
-    .upsert({ id: user.id }, { onConflict: "id" });
-
-  if (error) {
-    // Optional: ignore if profiles table doesn't exist or RLS blocks it for now.
-  }
-
   return (
-    <div className="min-h-screen bg-black text-white">
+    <div className="min-h-screen overflow-x-clip bg-black text-white">
+      <SessionGuard />
+      <OrganizationChoiceGuard />
       <div className="flex min-h-screen flex-col md:flex-row">
         <Sidebar />
-        <div className="flex flex-1 flex-col">
+        <div className="flex min-w-0 flex-1 flex-col">
           <Topbar />
-          <main className="flex-1 px-6 py-8 lg:px-10">
+          <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-10">
             <DashboardTransition>{children}</DashboardTransition>
           </main>
         </div>

@@ -57,7 +57,7 @@ export default function DashboardTransition({
   }, [pathname]);
 
   return (
-    <div className="relative h-full bg-black">
+    <div className="relative h-full min-w-0 bg-black">
       <AnimatePresence mode="sync" initial={false}>
         <motion.div
           key={pathname}
@@ -65,7 +65,7 @@ export default function DashboardTransition({
           initial="initial"
           animate="animate"
           exit="exit"
-          className="h-full will-change-[transform,opacity]"
+          className="h-full min-w-0 will-change-[transform,opacity]"
         >
           {children}
         </motion.div>

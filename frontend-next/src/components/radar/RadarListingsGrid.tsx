@@ -6,7 +6,7 @@ import type { Listing } from "@/hooks/useListings";
 
 function RadarListingsGrid({ listings }: { listings: Listing[] }) {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div className="grid w-full min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {listings.map((listing) => (
         <ListingCard key={listing.id} listing={listing} />
       ))}

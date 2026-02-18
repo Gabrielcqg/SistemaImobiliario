@@ -8,7 +8,7 @@ interface SkeletonListProps {
 
 export default function SkeletonList({
   count = 6,
-  className = "grid gap-4 sm:grid-cols-2 xl:grid-cols-3",
+  className = "grid w-full min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3",
   cardClassName = "h-56"
 }: SkeletonListProps) {
   return (

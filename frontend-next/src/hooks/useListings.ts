@@ -53,6 +53,11 @@ type UseListingsResult = {
   refetch: () => void;
 };
 
+type UseListingsOptions = {
+  organizationId?: string | null;
+  organizationReady?: boolean;
+};
+
 function useDebouncedValue<T>(value: T, delayMs: number) {
   const [debounced, setDebounced] = useState(value);
 
@@ -70,8 +75,10 @@ const parseMinFilter = (value?: number) =>
     : null;
 
 export function useListings(
-  initialFilters: ListingsFilters = { maxDaysFresh: 15 }
+  initialFilters: ListingsFilters = { maxDaysFresh: 15 },
+  options: UseListingsOptions = {}
 ): UseListingsResult {
+  const { organizationId = null, organizationReady = true } = options;
   const [filters, setFiltersState] = useState<ListingsFilters>({
 
     sort: "date_desc",
@@ -98,6 +105,20 @@ export function useListings(
   }, []);
 
   useEffect(() => {
+    if (!organizationReady) {
+      setLoading(true);
+      setError(null);
+      return;
+    }
+
+    if (!organizationId) {
+      setLoading(false);
+      setData([]);
+      setTotalCount(0);
+      setError("Nenhuma organizacao ativa foi encontrada para este usuario.");
+      return;
+    }
+
     let isActive = true;
     let timeoutId: number | null = null;
 
@@ -197,7 +218,15 @@ export function useListings(
       isActive = false;
       if (timeoutId) window.clearTimeout(timeoutId);
     };
-  }, [debouncedFilters, page, pageSize, supabase, refreshTick]);
+  }, [
+    debouncedFilters,
+    organizationId,
+    organizationReady,
+    page,
+    pageSize,
+    supabase,
+    refreshTick
+  ]);
 
   const hasNextPage =
     totalCount !== null ? (page + 1) * pageSize < totalCount : false;

@@ -102,7 +102,7 @@ export default function ListingCard({ listing }: ListingCardProps) {
   }, [listing.area_m2, listing.bathrooms, listing.bedrooms, listing.parking]);
 
   return (
-    <div className="relative overflow-visible">
+    <div className="relative w-full min-w-0">
       {isNew24h ? (
         <>
           <span className="sr-only">Imóvel novo nas últimas 24 horas</span>
@@ -110,12 +110,12 @@ export default function ListingCard({ listing }: ListingCardProps) {
             aria-hidden="true"
             className="
               pointer-events-none absolute -right-2 -top-2 z-20
-              flex h-6 w-6 items-center justify-center rounded-full
+              flex h-6 min-w-6 items-center justify-center rounded-full px-2
               border border-emerald-300/40 bg-emerald-500/90
-              text-[1px] font-semibold uppercase tracking-[0.10em] text-emerald-50
+              text-[9px] font-semibold uppercase tracking-[0.08em] text-emerald-50
               shadow-[0_0_12px_rgba(16,185,129,0.28)]
               backdrop-blur
-              sm:h-7 sm:w-7 sm:text-[6.5px]
+              sm:h-7 sm:min-w-7 sm:text-[10px]
             "
           >
             Novo

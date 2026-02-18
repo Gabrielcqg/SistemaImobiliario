@@ -242,15 +242,24 @@ def normalize_property_type(text: str, allowed: set = None) -> str:
 
     t = str(text).lower().strip()
 
+    # --- CORREÇÃO AQUI ---
+    # Adicionamos os termos em inglês (house, home) para caso o valor já esteja normalizado
+    
     if any(k in t for k in ["studio", "kitnet", "loft", "flat"]):
         return "other" if "other" in allowed else fallback
-    if any(k in t for k in ["casa", "sobrado"]):
+        
+    # Adicionado "house" e "home" na lista abaixo
+    if any(k in t for k in ["casa", "sobrado", "house", "home"]): 
         return "house" if "house" in allowed else fallback
-    if "apart" in t:
+        
+    # Adicionado "apartment" na lista (embora "apart" já pegasse, é bom garantir)
+    if any(k in t for k in ["apart", "apto", "flat"]): 
         return "apartment" if "apartment" in allowed else fallback
-    if any(k in t for k in ["lote", "terreno", "land"]):
+        
+    if any(k in t for k in ["lote", "terreno", "land", "plot"]):
         return "land" if "land" in allowed else fallback
-    if any(k in t for k in ["comercial", "loja", "sala", "office"]):
+        
+    if any(k in t for k in ["comercial", "loja", "sala", "office", "commercial"]):
         return "commercial" if "commercial" in allowed else fallback
 
     return "other" if "other" in allowed else fallback
@@ -868,10 +877,24 @@ async def run_scan(headless: bool):
             raise
 
         sb = None
-        if create_client and os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY"):
-            sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+        sb_url = os.getenv("SUPABASE_URL")
+        
+        # Tenta pegar a SERVICE_ROLE (Admin) primeiro. 
+        # Se não existir no .env, tenta usar a SUPABASE_KEY normal.
+        sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+
+        if create_client and sb_url and sb_key:
+            # Pequeno log para você saber qual chave está sendo usada
+            key_type = "SERVICE_ROLE (ADMIN)" if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else "ANON (PUBLICA)"
+            print(f"🔌 Conectando ao Supabase via {key_type}...")
+            
+            try:
+                sb = create_client(sb_url, sb_key)
+            except Exception as e:
+                print(f"❌ Erro ao inicializar cliente Supabase: {e}")
+                sb = None
         else:
-            print("⚠️ Supabase não configurado.")
+            print("⚠️ Supabase não configurado (Verifique SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY no .env).")
 
         pub_cache: Dict[str, str] = {}
         BATCH_SIZE = 10

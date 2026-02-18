@@ -1,29 +1,73 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import Image from "next/image";
+import { createPortal } from "react-dom";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
+import { useOrganizationContext } from "@/lib/auth/useOrganizationContext";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
 import { normalizeText } from "@/lib/format/text";
 
+type PipelineStatus =
+  | "novo_match"
+  | "em_conversa"
+  | "aguardando_resposta"
+  | "visita_agendada"
+  | "proposta"
+  | "fechado";
+
+type ClosedOutcome = "won" | "lost" | null;
+
+type LostReasonValue =
+  | "preco"
+  | "localizacao"
+  | "documentacao"
+  | "desistencia"
+  | "cliente_sumiu"
+  | "comprou_outro_imovel"
+  | "condicoes_imovel"
+  | "outro";
+
+type NextActionValue =
+  | "ligar"
+  | "whatsapp"
+  | "enviar_informacoes"
+  | "solicitar_documentos"
+  | "agendar_visita"
+  | "fazer_proposta"
+  | "follow_up"
+  | "outro";
+
 type Client = {
   id: string;
+  org_id?: string | null;
   user_id: string;
   name: string;
   contact_info: { email?: string; phone?: string } | null;
   data_retorno?: string | null;
   descricao_contexto?: string | null;
-  status_pipeline?: string | null;
+  status_pipeline?: PipelineStatus | string | null;
+  closed_outcome?: ClosedOutcome;
+  lost_reason?: LostReasonValue | string | null;
+  lost_reason_detail?: string | null;
+  next_action?: NextActionValue | string | null;
+  next_followup_at?: string | null;
+  visit_at?: string | null;
+  visit_notes?: string | null;
+  proposal_value?: number | null;
+  proposal_valid_until?: string | null;
+  last_status_change_at?: string | null;
   created_at?: string | null;
 };
 
 type ClientFilter = {
   id?: string;
+  org_id?: string | null;
   client_id: string;
   active: boolean;
   min_price: number | null;
@@ -33,8 +77,9 @@ type ClientFilter = {
   min_bathrooms?: number | null;
   min_parking?: number | null;
   min_area_m2?: number | null;
+  max_area_m2?: number | null;
   max_days_fresh: number | null;
-  property_types: string[];
+  property_types: string[] | null;
 };
 
 type Listing = {
@@ -49,10 +94,13 @@ type Listing = {
   property_type: "apartment" | "house" | "other" | "land" | null;
   url: string | null;
   main_image_url: string | null;
+  published_at?: string | null;
+  first_seen_at?: string | null;
 };
 
 type Match = {
   id: string;
+  org_id?: string | null;
   client_id: string;
   listing_id: string;
   seen: boolean;
@@ -63,6 +111,52 @@ type Match = {
   _isNew?: boolean;
 };
 
+type TimelinePayload = {
+  note?: string | null;
+  next_action?: NextActionValue | string | null;
+  next_followup_at?: string | null;
+  visit_at?: string | null;
+  visit_notes?: string | null;
+  proposal_value?: number | null;
+  proposal_valid_until?: string | null;
+  closed_outcome?: ClosedOutcome;
+  lost_reason?: LostReasonValue | string | null;
+  lost_reason_detail?: string | null;
+  final_value?: number | null;
+  final_note?: string | null;
+  source?: "pipeline" | "card";
+};
+
+type CrmTimelineEvent = {
+  id: string;
+  org_id?: string | null;
+  client_id: string;
+  event_type: string;
+  from_status: PipelineStatus | string | null;
+  to_status: PipelineStatus | string | null;
+  actor_user_id?: string | null;
+  payload?: TimelinePayload | null;
+  created_at: string | null;
+};
+
+type PipelineModalSource = "pipeline" | "card";
+
+type PipelineTransitionDraft = {
+  next_action: NextActionValue | "";
+  no_followup_date: boolean;
+  next_followup_at: string;
+  note: string;
+  closed_outcome: ClosedOutcome;
+  lost_reason: LostReasonValue | "";
+  lost_reason_detail: string;
+  visit_at: string;
+  visit_notes: string;
+  proposal_value: string;
+  proposal_valid_until: string;
+  final_value: string;
+  final_note: string;
+};
+
 type ListingRuleFn = (
   listing?: Listing | null,
   override?: ClientFilter | null
@@ -71,16 +165,64 @@ type ListingRuleFn = (
 type ListingRules = {
   isWithinPriceRange: ListingRuleFn;
   isWithinListingRules: ListingRuleFn;
+  isWithinFreshWindow: ListingRuleFn;
 };
 
 const LAST_VIEWED_KEY = "crm:lastViewedAtByClient";
 const PIPELINE_STEPS = [
   { value: "novo_match", label: "Novo Match" },
   { value: "em_conversa", label: "Em Conversa" },
+  { value: "aguardando_resposta", label: "Aguardando resposta" },
   { value: "visita_agendada", label: "Visita Agendada" },
   { value: "proposta", label: "Proposta" },
   { value: "fechado", label: "Fechado" }
 ] as const;
+const PIPELINE_INDEX_BY_STATUS: Record<PipelineStatus, number> = {
+  novo_match: 0,
+  em_conversa: 1,
+  aguardando_resposta: 2,
+  visita_agendada: 3,
+  proposta: 4,
+  fechado: 5
+};
+const PIPELINE_STATUS_LABEL: Record<PipelineStatus, string> = {
+  novo_match: "Novo Match",
+  em_conversa: "Em Conversa",
+  aguardando_resposta: "Aguardando resposta",
+  visita_agendada: "Visita Agendada",
+  proposta: "Proposta",
+  fechado: "Fechado"
+};
+const CLOSED_OUTCOME_OPTIONS = [
+  { value: "won", label: "Fechado (Ganho)" },
+  { value: "lost", label: "Fechado (Perdido)" }
+] as const;
+const LOST_REASON_OPTIONS: { value: LostReasonValue; label: string }[] = [
+  { value: "preco", label: "Preço" },
+  { value: "localizacao", label: "Localização" },
+  { value: "documentacao", label: "Documentação" },
+  { value: "desistencia", label: "Desistência" },
+  { value: "cliente_sumiu", label: "Cliente sumiu" },
+  { value: "comprou_outro_imovel", label: "Comprou outro imóvel" },
+  { value: "condicoes_imovel", label: "Condições do imóvel" },
+  { value: "outro", label: "Outro" }
+];
+const NEXT_ACTION_OPTIONS: { value: NextActionValue; label: string }[] = [
+  { value: "ligar", label: "Ligar" },
+  { value: "whatsapp", label: "WhatsApp" },
+  { value: "enviar_informacoes", label: "Enviar informações" },
+  { value: "solicitar_documentos", label: "Solicitar documentos" },
+  { value: "agendar_visita", label: "Agendar visita" },
+  { value: "fazer_proposta", label: "Fazer proposta" },
+  { value: "follow_up", label: "Follow-up" },
+  { value: "outro", label: "Outro" }
+];
+const NEXT_ACTION_SET = new Set<NextActionValue>(
+  NEXT_ACTION_OPTIONS.map((option) => option.value)
+);
+const LOST_REASON_SET = new Set<LostReasonValue>(
+  LOST_REASON_OPTIONS.map((option) => option.value)
+);
 const PROPERTY_TYPE_OPTIONS = [
   { value: "apartment", label: "apartment" },
   { value: "house", label: "house" },
@@ -91,6 +233,27 @@ type PropertyTypeValue = (typeof PROPERTY_TYPE_OPTIONS)[number]["value"];
 const PROPERTY_TYPE_SET = new Set<PropertyTypeValue>(
   PROPERTY_TYPE_OPTIONS.map((option) => option.value)
 );
+const FRESHNESS_OPTIONS = [
+  { label: "Todos", value: "" },
+  { label: "7 dias", value: "7" },
+  { label: "15 dias", value: "15" },
+  { label: "30 dias", value: "30" }
+] as const;
+const createInitialPipelineTransitionDraft = (): PipelineTransitionDraft => ({
+  next_action: "",
+  no_followup_date: false,
+  next_followup_at: "",
+  note: "",
+  closed_outcome: null,
+  lost_reason: "",
+  lost_reason_detail: "",
+  visit_at: "",
+  visit_notes: "",
+  proposal_value: "",
+  proposal_valid_until: "",
+  final_value: "",
+  final_note: ""
+});
 
 const formatCurrency = (value: number | null) => {
   if (value === null || Number.isNaN(value)) return "—";
@@ -106,6 +269,33 @@ const parseDateSafe = (value?: string | null) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date;
+};
+
+const formatDateTimeDisplay = (value?: string | null) => {
+  const date = parseDateSafe(value);
+  if (!date) return "—";
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+};
+
+const toDateTimeLocalInputValue = (value?: string | null) => {
+  const date = parseDateSafe(value);
+  if (!date) return "";
+
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
+  return local.toISOString().slice(0, 16);
+};
+
+const fromDateTimeLocalInputValue = (value?: string | null) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
 };
 
 const toDateInputValue = (value?: string | null) => {
@@ -147,6 +337,31 @@ const parseMinInput = (value: string) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 };
 
+const parseDecimalInput = (value: string) => {
+  if (!value.trim()) return null;
+  const normalized = value.replace(",", ".");
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizePipelineStatus = (value?: string | null): PipelineStatus => {
+  if (value === "novo_match") return "novo_match";
+  if (value === "em_conversa") return "em_conversa";
+  if (value === "aguardando_resposta") return "aguardando_resposta";
+  if (value === "visita_agendada") return "visita_agendada";
+  if (value === "proposta") return "proposta";
+  if (value === "fechado") return "fechado";
+  return "novo_match";
+};
+
+const parseFreshDays = (value: string | number | null | undefined) => {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed === 7 || parsed === 15 || parsed === 30) return parsed;
+  return null;
+};
+
 const passesMinOrZero = (
   listingValue: number | null | undefined,
   minValue: number | null
@@ -158,8 +373,22 @@ const passesMinOrZero = (
   return listingValue === 0 || listingValue >= minValue;
 };
 
+const passesMaxOrZero = (
+  listingValue: number | null | undefined,
+  maxValue: number | null
+) => {
+  if (maxValue === null) return true;
+  if (typeof listingValue !== "number" || !Number.isFinite(listingValue)) {
+    return true;
+  }
+  return listingValue === 0 || listingValue <= maxValue;
+};
+
 const isMissingColumnError = (errorMessage?: string) =>
-  typeof errorMessage === "string" && /column .* does not exist/i.test(errorMessage);
+  typeof errorMessage === "string" &&
+  /(column .* does not exist|could not find the .* column .* schema cache|pgrst204)/i.test(
+    errorMessage
+  );
 
 const truncateWords = (value: string, maxWords: number) => {
   const words = value.trim().split(/\s+/).filter(Boolean);
@@ -192,6 +421,13 @@ const saveLastViewedMap = (next: Record<string, string>) => {
 
 export default function CrmPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+  const {
+    context: organizationContext,
+    organizationId,
+    loading: organizationLoading,
+    needsOrganizationChoice,
+    error: organizationError
+  } = useOrganizationContext();
 
   const [clients, setClients] = useState<Client[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
@@ -216,7 +452,8 @@ export default function CrmPage() {
     min_bathrooms: "",
     min_parking: "",
     min_area_m2: "",
-    max_days_fresh: "7",
+    max_area_m2: "",
+    max_days_fresh: "15",
     property_types: ""
   });
   const [neighborhoodInput, setNeighborhoodInput] = useState("");
@@ -248,13 +485,54 @@ export default function CrmPage() {
   );
   const [shareMessage, setShareMessage] = useState<string | null>(null);
   const [shareFeedback, setShareFeedback] = useState<string | null>(null);
+  const [isClientSide, setIsClientSide] = useState(false);
+  const [timelineEvents, setTimelineEvents] = useState<CrmTimelineEvent[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [mobileStagePickerOpen, setMobileStagePickerOpen] = useState(false);
+  const [statusModalOpen, setStatusModalOpen] = useState(false);
+  const [statusModalSaving, setStatusModalSaving] = useState(false);
+  const [statusModalError, setStatusModalError] = useState<string | null>(null);
+  const [statusModalTarget, setStatusModalTarget] =
+    useState<PipelineStatus>("novo_match");
+  const [statusModalFrom, setStatusModalFrom] =
+    useState<PipelineStatus>("novo_match");
+  const [statusModalSource, setStatusModalSource] =
+    useState<PipelineModalSource>("pipeline");
+  const [transitionDraft, setTransitionDraft] = useState<PipelineTransitionDraft>(
+    createInitialPipelineTransitionDraft
+  );
+  const [confirmedIndex, setConfirmedIndex] = useState(0);
+  const [pendingIndex, setPendingIndex] = useState<number | null>(null);
+  const [animIndex, setAnimIndex] = useState(0);
+  const [isPipelineAnimating, setIsPipelineAnimating] = useState(false);
+  const [pipelineTrack, setPipelineTrack] = useState({
+    start: 0,
+    width: 0,
+    fill: 0,
+    top: 0,
+    ready: false
+  });
+  const prefersReducedMotion = useReducedMotion();
 
   const realtimeRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const queueRef = useRef<Match[]>([]);
   const queueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pipelineAnimationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const processingQueueRef = useRef(false);
   const lastViewedAtRef = useRef<Record<string, string>>({});
   const matchIdsRef = useRef<Set<string>>(new Set());
+  const pipelineChipsRef = useRef<HTMLDivElement | null>(null);
+  const pipelineButtonRefs = useRef<Record<PipelineStatus, HTMLButtonElement | null>>(
+    {
+      novo_match: null,
+      em_conversa: null,
+      aguardando_resposta: null,
+      visita_agendada: null,
+      proposta: null,
+      fechado: null
+    }
+  );
   const fetchClientsRef = useRef<(nextSelectedId?: string) => Promise<void>>(
     async () => {}
   );
@@ -283,11 +561,23 @@ export default function CrmPage() {
       filterOverride?: ClientFilter | null
     ) => Promise<void>
   >(async () => {});
+  const fetchTimelineRef = useRef<(clientId: string) => Promise<void>>(
+    async () => {}
+  );
   const acknowledgeClientViewRef = useRef<(clientId: string) => void>(() => {});
   const listingRulesRef = useRef<ListingRules | null>(null);
 
   const selectedClient =
     clients.find((client) => client.id === selectedClientId) ?? null;
+  const confirmedPipelineStatus = normalizePipelineStatus(clientDraft.status_pipeline);
+  const displayIndex = isPipelineAnimating ? animIndex : confirmedIndex;
+  const displayPipelineStatus =
+    PIPELINE_STEPS[displayIndex]?.value ?? PIPELINE_STEPS[0].value;
+  const statusModalIsActivityOnly = statusModalFrom === statusModalTarget;
+  const pipelineProgressPercent =
+    PIPELINE_STEPS.length > 1
+      ? (displayIndex / (PIPELINE_STEPS.length - 1)) * 100
+      : 0;
   const selectedNeighborhoods = useMemo(
     () => toArray(filterDraft.neighborhoods),
     [filterDraft.neighborhoods]
@@ -296,6 +586,116 @@ export default function CrmPage() {
     () => toPropertyTypeValues(filterDraft.property_types),
     [filterDraft.property_types]
   );
+
+  const clearPipelineAnimationTimer = useCallback(() => {
+    if (!pipelineAnimationTimerRef.current) return;
+    clearTimeout(pipelineAnimationTimerRef.current);
+    pipelineAnimationTimerRef.current = null;
+  }, []);
+
+  const playPipelineProgressAnimation = useCallback(
+    async (targetIndex: number) => {
+      const normalizedTarget = Math.max(
+        0,
+        Math.min(targetIndex, PIPELINE_STEPS.length - 1)
+      );
+
+      clearPipelineAnimationTimer();
+
+      if (prefersReducedMotion) {
+        setAnimIndex(normalizedTarget);
+        setIsPipelineAnimating(false);
+        return;
+      }
+
+      setIsPipelineAnimating(true);
+      setAnimIndex(0);
+
+      await new Promise<void>((resolve) => {
+        let current = 0;
+        const stepMs = 150;
+
+        const tick = () => {
+          if (current >= normalizedTarget) {
+            setAnimIndex(normalizedTarget);
+            setIsPipelineAnimating(false);
+            pipelineAnimationTimerRef.current = null;
+            resolve();
+            return;
+          }
+
+          current += 1;
+          setAnimIndex(current);
+          pipelineAnimationTimerRef.current = setTimeout(tick, stepMs);
+        };
+
+        if (normalizedTarget === 0) {
+          setAnimIndex(0);
+          setIsPipelineAnimating(false);
+          resolve();
+          return;
+        }
+
+        pipelineAnimationTimerRef.current = setTimeout(tick, stepMs);
+      });
+    },
+    [clearPipelineAnimationTimer, prefersReducedMotion]
+  );
+
+  const recalculatePipelineTrack = useCallback(() => {
+    const container = pipelineChipsRef.current;
+    const first = pipelineButtonRefs.current[PIPELINE_STEPS[0].value];
+    const last = pipelineButtonRefs.current[PIPELINE_STEPS[PIPELINE_STEPS.length - 1].value];
+    const active = pipelineButtonRefs.current[displayPipelineStatus];
+
+    if (!container || !first || !last || !active) {
+      setPipelineTrack((prev) =>
+        prev.ready ? { start: 0, width: 0, fill: 0, top: 0, ready: false } : prev
+      );
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const firstRect = first.getBoundingClientRect();
+    const lastRect = last.getBoundingClientRect();
+    const activeRect = active.getBoundingClientRect();
+
+    const start = firstRect.left + firstRect.width / 2 - containerRect.left;
+    const end = lastRect.left + lastRect.width / 2 - containerRect.left;
+    const activeCenter =
+      activeRect.left + activeRect.width / 2 - containerRect.left;
+    const lineTop =
+      firstRect.top -
+      containerRect.top +
+      firstRect.height / 2 +
+      Math.max(firstRect.height * 0.62, 10);
+
+    const width = Math.max(end - start, 0);
+    const fill = Math.min(Math.max(activeCenter - start, 0), width);
+
+    setPipelineTrack({ start, width, fill, top: lineTop, ready: true });
+  }, [displayPipelineStatus]);
+
+  useEffect(() => {
+    const nextIndex = PIPELINE_INDEX_BY_STATUS[confirmedPipelineStatus];
+    setConfirmedIndex(nextIndex);
+    if (!isPipelineAnimating) {
+      setAnimIndex(nextIndex);
+    }
+  }, [confirmedPipelineStatus, isPipelineAnimating]);
+
+  useEffect(() => () => clearPipelineAnimationTimer(), [clearPipelineAnimationTimer]);
+
+  useEffect(() => {
+    const raf = window.requestAnimationFrame(recalculatePipelineTrack);
+    return () => window.cancelAnimationFrame(raf);
+  }, [recalculatePipelineTrack, selectedClientId, statusModalOpen, displayIndex]);
+
+  useEffect(() => {
+    const onResize = () => recalculatePipelineTrack();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [recalculatePipelineTrack]);
 
   const setNeighborhoodList = (nextValues: string[]) => {
     setFilterDraft((prev) => ({
@@ -347,9 +747,16 @@ export default function CrmPage() {
       phone: client?.contact_info?.phone ?? "",
       data_retorno: toDateInputValue(client?.data_retorno ?? null),
       descricao_contexto: client?.descricao_contexto ?? "",
-      status_pipeline: client?.status_pipeline ?? PIPELINE_STEPS[0].value
+      status_pipeline: normalizePipelineStatus(client?.status_pipeline)
     });
   };
+
+  const getStatusLabel = (status?: string | null) =>
+    PIPELINE_STATUS_LABEL[normalizePipelineStatus(status)];
+  const getNextActionLabel = (value?: string | null) =>
+    NEXT_ACTION_OPTIONS.find((option) => option.value === value)?.label ?? value ?? "—";
+  const getLostReasonLabel = (value?: string | null) =>
+    LOST_REASON_OPTIONS.find((option) => option.value === value)?.label ?? value ?? "—";
 
   const getNeighborhood = (listing?: Listing | null) =>
     listing?.neighborhood ?? "Bairro não informado";
@@ -394,6 +801,10 @@ export default function CrmPage() {
       typeof override?.min_area_m2 === "number"
         ? parseMinFilter(override.min_area_m2)
         : parseMinInput(filterDraft.min_area_m2);
+    const maxAreaM2 =
+      typeof override?.max_area_m2 === "number"
+        ? parseMinFilter(override.max_area_m2)
+        : parseMinInput(filterDraft.max_area_m2);
     const propertyTypes = Array.isArray(override?.property_types)
       ? override.property_types.filter(
           (item): item is PropertyTypeValue =>
@@ -406,8 +817,30 @@ export default function CrmPage() {
       minBathrooms,
       minParking,
       minAreaM2,
+      maxAreaM2,
       propertyTypes
     };
+  };
+
+  const getMaxDaysFresh = (override?: ClientFilter | null) => {
+    if (typeof override?.max_days_fresh === "number") {
+      return parseFreshDays(override.max_days_fresh);
+    }
+    return parseFreshDays(filterDraft.max_days_fresh);
+  };
+
+  const isWithinFreshWindow = (
+    listing?: Listing | null,
+    override?: ClientFilter | null
+  ) => {
+    const maxDaysFresh = getMaxDaysFresh(override);
+    if (maxDaysFresh === null) return true;
+    const referenceDate = listing?.published_at ?? listing?.first_seen_at;
+    if (!referenceDate) return true;
+    const ts = new Date(referenceDate).getTime();
+    if (!Number.isFinite(ts)) return true;
+    const cutoff = Date.now() - maxDaysFresh * 24 * 60 * 60 * 1000;
+    return ts >= cutoff;
   };
 
   const isWithinPriceRange = (
@@ -436,7 +869,14 @@ export default function CrmPage() {
   ): boolean => {
     if (!listing) return true;
 
-    const { minBedrooms, minBathrooms, minParking, minAreaM2, propertyTypes } =
+    const {
+      minBedrooms,
+      minBathrooms,
+      minParking,
+      minAreaM2,
+      maxAreaM2,
+      propertyTypes
+    } =
       getListingFilters(override);
 
     if (propertyTypes.length > 0) {
@@ -451,17 +891,21 @@ export default function CrmPage() {
     if (!isLand && !passesMinOrZero(listing.bathrooms, minBathrooms)) return false;
     if (!isLand && !passesMinOrZero(listing.parking, minParking)) return false;
     if (!passesMinOrZero(listing.area_m2, minAreaM2)) return false;
+    if (!passesMaxOrZero(listing.area_m2, maxAreaM2)) return false;
 
     return true;
   };
 
   const filterMatchesByDraft = (rows: Match[], override?: ClientFilter | null) =>
-    filterByPriceRange(rows, override).filter((row) =>
-      isWithinListingRules(row.listing, override)
+    filterByPriceRange(rows, override).filter(
+      (row) =>
+        isWithinFreshWindow(row.listing, override) &&
+        isWithinListingRules(row.listing, override)
     );
   listingRulesRef.current = {
     isWithinPriceRange,
-    isWithinListingRules
+    isWithinListingRules,
+    isWithinFreshWindow
   };
 
   const updateClientAlert = (clientId: string, delta: number) => {
@@ -478,10 +922,16 @@ export default function CrmPage() {
   };
 
   const fetchClientAlerts = async () => {
+    if (!organizationId) {
+      setClientAlerts({});
+      return;
+    }
+
     setAlertsError(null);
     const { data, error } = await supabase
       .from("automated_matches")
       .select("client_id")
+      .eq("org_id", organizationId)
       .eq("seen", false);
 
     if (error) {
@@ -530,12 +980,18 @@ export default function CrmPage() {
     );
 
     const ids = Array.from(new Set(missing.map((row) => row.listing_id)));
-    const { data, error } = await supabase
+    let listingQuery = supabase
       .from("listings")
       .select(
-        "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url"
+        "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at"
       )
       .in("id", ids);
+
+    if (organizationId) {
+      listingQuery = listingQuery.or(`org_id.is.null,org_id.eq.${organizationId}`);
+    }
+
+    const { data, error } = await listingQuery;
 
     if (error) {
       setMatchesError(error.message);
@@ -577,12 +1033,33 @@ export default function CrmPage() {
   };
 
   const fetchClients = async (nextSelectedId?: string) => {
+    if (!organizationId) {
+      setClients([]);
+      setSelectedClientId(null);
+      return;
+    }
+
     setClientError(null);
-    const { data, error } = await supabase
+    const selectWithPipelineMetadata =
+      "id, org_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, closed_outcome, lost_reason, lost_reason_detail, next_action, next_followup_at, visit_at, visit_notes, proposal_value, proposal_valid_until, last_status_change_at, created_at";
+    const selectLegacyColumns =
+      "id, org_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at";
+
+    const primary = await supabase
       .from("clients")
-      .select(
-        "id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at"
-      );
+      .select(selectWithPipelineMetadata)
+      .eq("org_id", organizationId);
+    let data = (primary.data as Client[] | null) ?? null;
+    let error = primary.error;
+
+    if (error && isMissingColumnError(error.message)) {
+      const fallback = await supabase
+        .from("clients")
+        .select(selectLegacyColumns)
+        .eq("org_id", organizationId);
+      data = (fallback.data as Client[] | null) ?? null;
+      error = fallback.error;
+    }
 
     if (error) {
       setClientError(error.message);
@@ -631,43 +1108,351 @@ export default function CrmPage() {
   };
   fetchClientsRef.current = fetchClients;
 
-  const handlePipelineChange = async (nextStatus: string) => {
-    if (!selectedClientId) {
-      setClientDraft((prev) => ({ ...prev, status_pipeline: nextStatus }));
+  const fetchTimeline = async (clientId: string) => {
+    if (!organizationId) {
+      setTimelineEvents([]);
+      setTimelineLoading(false);
       return;
     }
-    const { error } = await supabase
-      .from("clients")
-      .update({ status_pipeline: nextStatus })
-      .eq("id", selectedClientId);
+
+    setTimelineLoading(true);
+    setTimelineError(null);
+
+    const { data, error } = await supabase
+      .from("crm_timeline")
+      .select(
+        "id, org_id, client_id, event_type, from_status, to_status, actor_user_id, payload, created_at"
+      )
+      .eq("org_id", organizationId)
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(30);
 
     if (error) {
-      setClientError(error.message);
-      console.error("Erro ao atualizar pipeline:", error);
+      setTimelineError(error.message);
+      setTimelineEvents([]);
+      console.error("Erro ao buscar timeline:", error);
+    } else {
+      setTimelineEvents((data as CrmTimelineEvent[] | null) ?? []);
+    }
+
+    setTimelineLoading(false);
+  };
+  fetchTimelineRef.current = fetchTimeline;
+
+  const openStatusTransitionModal = (
+    nextStatus: PipelineStatus,
+    source: PipelineModalSource = "pipeline"
+  ) => {
+    if (!organizationId) {
+      setClientError("Nenhuma organizacao ativa para atualizar o pipeline.");
       return;
     }
 
-    setClientDraft((prev) => ({ ...prev, status_pipeline: nextStatus }));
+    if (!selectedClientId || !selectedClient) {
+      setClientError("Selecione e salve um cliente antes de mover no pipeline.");
+      return;
+    }
+
+    const currentStatus = normalizePipelineStatus(
+      selectedClient.status_pipeline ?? clientDraft.status_pipeline
+    );
+
+    const nextDraft = createInitialPipelineTransitionDraft();
+    if (
+      selectedClient.next_action &&
+      NEXT_ACTION_SET.has(selectedClient.next_action as NextActionValue)
+    ) {
+      nextDraft.next_action = selectedClient.next_action as NextActionValue;
+    }
+
+    if (selectedClient.next_followup_at) {
+      nextDraft.no_followup_date = false;
+      nextDraft.next_followup_at = toDateTimeLocalInputValue(
+        selectedClient.next_followup_at
+      );
+    } else {
+      nextDraft.no_followup_date = true;
+      nextDraft.next_followup_at = "";
+    }
+
+    if (nextStatus === "visita_agendada") {
+      nextDraft.visit_at = toDateTimeLocalInputValue(selectedClient.visit_at);
+      nextDraft.visit_notes = selectedClient.visit_notes ?? "";
+    }
+
+    if (nextStatus === "proposta") {
+      nextDraft.proposal_value =
+        typeof selectedClient.proposal_value === "number"
+          ? String(selectedClient.proposal_value)
+          : "";
+      nextDraft.proposal_valid_until = toDateInputValue(
+        selectedClient.proposal_valid_until
+      );
+    }
+
+    if (nextStatus === "fechado") {
+      nextDraft.closed_outcome =
+        selectedClient.closed_outcome === "won" ||
+        selectedClient.closed_outcome === "lost"
+          ? selectedClient.closed_outcome
+          : "won";
+      if (
+        selectedClient.lost_reason &&
+        LOST_REASON_SET.has(selectedClient.lost_reason as LostReasonValue)
+      ) {
+        nextDraft.lost_reason = selectedClient.lost_reason as LostReasonValue;
+      }
+      nextDraft.lost_reason_detail = selectedClient.lost_reason_detail ?? "";
+    }
+
+    setStatusModalFrom(currentStatus);
+    setStatusModalTarget(nextStatus);
+    setStatusModalSource(source);
+    setMobileStagePickerOpen(false);
+    setPendingIndex(PIPELINE_INDEX_BY_STATUS[nextStatus]);
+    setTransitionDraft(nextDraft);
+    setStatusModalError(null);
+    setStatusModalOpen(true);
+  };
+
+  const closeStatusTransitionModal = () => {
+    if (statusModalSaving) return;
+    setStatusModalOpen(false);
+    setPendingIndex(null);
+    setStatusModalError(null);
+  };
+
+  const handlePipelineChange = (
+    nextStatus: PipelineStatus,
+    source: PipelineModalSource = "pipeline"
+  ) => {
+    setMobileStagePickerOpen(false);
+    openStatusTransitionModal(nextStatus, source);
+  };
+
+  const handleConfirmStatusTransition = async () => {
+    if (!organizationId || !selectedClientId || !selectedClient) {
+      setStatusModalError("Cliente inválido para atualizar status.");
+      return;
+    }
+
+    if (!transitionDraft.next_action) {
+      setStatusModalError("Selecione a próxima ação.");
+      return;
+    }
+
+    if (!transitionDraft.no_followup_date && !transitionDraft.next_followup_at) {
+      setStatusModalError("Defina a data/hora do próximo follow-up ou marque sem data.");
+      return;
+    }
+
+    const nextFollowUpAt = transitionDraft.no_followup_date
+      ? null
+      : fromDateTimeLocalInputValue(transitionDraft.next_followup_at);
+
+    if (!transitionDraft.no_followup_date && !nextFollowUpAt) {
+      setStatusModalError("Data do follow-up inválida.");
+      return;
+    }
+
+    let visitAt: string | null = null;
+    if (statusModalTarget === "visita_agendada") {
+      visitAt = fromDateTimeLocalInputValue(transitionDraft.visit_at);
+      if (!visitAt) {
+        setStatusModalError("Data/hora da visita é obrigatória.");
+        return;
+      }
+    }
+
+    let proposalValue: number | null = null;
+    let proposalValidUntil: string | null = null;
+    if (statusModalTarget === "proposta") {
+      proposalValue = parseDecimalInput(transitionDraft.proposal_value);
+      if (proposalValue === null) {
+        setStatusModalError("Valor da proposta é obrigatório.");
+        return;
+      }
+      if (transitionDraft.proposal_valid_until) {
+        const proposalDate = new Date(transitionDraft.proposal_valid_until);
+        if (Number.isNaN(proposalDate.getTime())) {
+          setStatusModalError("Validade da proposta inválida.");
+          return;
+        }
+        proposalValidUntil = proposalDate.toISOString();
+      }
+    }
+
+    let closedOutcome: ClosedOutcome = null;
+    let lostReason: LostReasonValue | null = null;
+    let lostReasonDetail: string | null = null;
+    if (statusModalTarget === "fechado") {
+      closedOutcome = transitionDraft.closed_outcome;
+      if (!closedOutcome) {
+        setStatusModalError("Selecione se o fechamento foi ganho ou perdido.");
+        return;
+      }
+
+      if (closedOutcome === "lost") {
+        if (!transitionDraft.lost_reason) {
+          setStatusModalError("Motivo da perda é obrigatório.");
+          return;
+        }
+        lostReason = transitionDraft.lost_reason;
+        lostReasonDetail = transitionDraft.lost_reason_detail.trim() || null;
+      }
+    }
+
+    const finalValue = parseDecimalInput(transitionDraft.final_value);
+    const nowIso = new Date().toISOString();
+
+    const isStatusChange = statusModalTarget !== statusModalFrom;
+    const updatePayload: Record<string, unknown> = {
+      status_pipeline: statusModalTarget,
+      closed_outcome: statusModalTarget === "fechado" ? closedOutcome : null,
+      lost_reason:
+        statusModalTarget === "fechado" && closedOutcome === "lost"
+          ? lostReason
+          : null,
+      lost_reason_detail:
+        statusModalTarget === "fechado" && closedOutcome === "lost"
+          ? lostReasonDetail
+          : null,
+      next_action: transitionDraft.next_action,
+      next_followup_at: nextFollowUpAt
+    };
+    if (isStatusChange) {
+      updatePayload.last_status_change_at = nowIso;
+    }
+
+    if (statusModalTarget === "visita_agendada") {
+      updatePayload.visit_at = visitAt;
+      updatePayload.visit_notes = transitionDraft.visit_notes.trim() || null;
+    }
+
+    if (statusModalTarget === "proposta") {
+      updatePayload.proposal_value = proposalValue;
+      updatePayload.proposal_valid_until = proposalValidUntil;
+    }
+
+    setStatusModalSaving(true);
+    setStatusModalError(null);
+    setClientError(null);
+
+    const { error: updateError } = await supabase
+      .from("clients")
+      .update(updatePayload)
+      .eq("id", selectedClientId)
+      .eq("org_id", organizationId);
+
+    if (updateError) {
+      setStatusModalSaving(false);
+      setStatusModalError(updateError.message);
+      console.error("Erro ao atualizar pipeline:", updateError);
+      return;
+    }
+
+    const timelinePayload: TimelinePayload = {
+      source: statusModalSource,
+      note: transitionDraft.note.trim() || null,
+      next_action: transitionDraft.next_action,
+      next_followup_at: nextFollowUpAt,
+      visit_at: visitAt,
+      visit_notes: transitionDraft.visit_notes.trim() || null,
+      proposal_value: proposalValue,
+      proposal_valid_until: proposalValidUntil,
+      closed_outcome: closedOutcome,
+      lost_reason: lostReason,
+      lost_reason_detail: lostReasonDetail,
+      final_value: finalValue,
+      final_note: transitionDraft.final_note.trim() || null
+    };
+
+    const timelinePayloadClean = Object.fromEntries(
+      Object.entries(timelinePayload).filter(([, value]) => value !== undefined)
+    );
+
+    const { error: timelineInsertError } = await supabase.from("crm_timeline").insert({
+      org_id: organizationId,
+      client_id: selectedClientId,
+      event_type: isStatusChange ? "STATUS_CHANGE" : "PIPELINE_ACTIVITY",
+      from_status: statusModalFrom,
+      to_status: statusModalTarget,
+      payload: timelinePayloadClean
+    });
+
+    if (timelineInsertError) {
+      console.error("Erro ao registrar evento da timeline:", timelineInsertError);
+      setClientError(
+        `Status atualizado, mas não foi possível registrar histórico: ${timelineInsertError.message}`
+      );
+    }
+
+    const targetIndex = PIPELINE_INDEX_BY_STATUS[statusModalTarget];
+    setConfirmedIndex(targetIndex);
+    setClientDraft((prev) => ({ ...prev, status_pipeline: statusModalTarget }));
     setClients((prev) =>
       prev.map((client) =>
         client.id === selectedClientId
-          ? { ...client, status_pipeline: nextStatus }
+          ? {
+              ...client,
+              status_pipeline: statusModalTarget,
+              closed_outcome:
+                statusModalTarget === "fechado" ? closedOutcome : null,
+              lost_reason:
+                statusModalTarget === "fechado" && closedOutcome === "lost"
+                  ? lostReason
+                  : null,
+              lost_reason_detail:
+                statusModalTarget === "fechado" && closedOutcome === "lost"
+                  ? lostReasonDetail
+                  : null,
+              next_action: transitionDraft.next_action,
+              next_followup_at: nextFollowUpAt,
+              visit_at: statusModalTarget === "visita_agendada" ? visitAt : client.visit_at,
+              visit_notes:
+                statusModalTarget === "visita_agendada"
+                  ? transitionDraft.visit_notes.trim() || null
+                  : client.visit_notes,
+              proposal_value:
+                statusModalTarget === "proposta" ? proposalValue : client.proposal_value,
+              proposal_valid_until:
+                statusModalTarget === "proposta"
+                  ? proposalValidUntil
+                  : client.proposal_valid_until,
+              last_status_change_at: isStatusChange
+                ? nowIso
+                : client.last_status_change_at
+            }
           : client
       )
     );
+
+    await fetchTimelineRef.current(selectedClientId);
+    setStatusModalOpen(false);
+    setPendingIndex(null);
+    setStatusModalError(null);
+    setStatusModalSaving(false);
+    await playPipelineProgressAnimation(targetIndex);
   };
 
   const fetchFilter = async (clientId: string) => {
+    if (!organizationId) {
+      setFilterError("Nenhuma organizacao ativa para carregar filtros.");
+      return null;
+    }
+
     setFilterError(null);
     const selectWithExtendedColumns =
-      "id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_days_fresh, property_types";
+      "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_area_m2, max_days_fresh, property_types";
     const selectBaseColumns =
-      "id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, max_days_fresh, property_types";
+      "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, max_days_fresh, property_types";
 
     const primary = await supabase
       .from("client_filters")
       .select(selectWithExtendedColumns)
       .eq("client_id", clientId)
+      .eq("org_id", organizationId)
       .maybeSingle();
     let filterData = (primary.data as ClientFilter | null) ?? null;
     let filterError = primary.error;
@@ -677,6 +1462,7 @@ export default function CrmPage() {
         .from("client_filters")
         .select(selectBaseColumns)
         .eq("client_id", clientId)
+        .eq("org_id", organizationId)
         .maybeSingle();
       filterData = (fallback.data as ClientFilter | null) ?? null;
       filterError = fallback.error;
@@ -706,7 +1492,8 @@ export default function CrmPage() {
       min_bathrooms: filter?.min_bathrooms?.toString() ?? "",
       min_parking: filter?.min_parking?.toString() ?? "",
       min_area_m2: filter?.min_area_m2?.toString() ?? "",
-      max_days_fresh: filter?.max_days_fresh?.toString() ?? "7",
+      max_area_m2: filter?.max_area_m2?.toString() ?? "",
+      max_days_fresh: filter?.max_days_fresh?.toString() ?? "15",
       property_types: Array.isArray(filter?.property_types)
         ? filter?.property_types
             .filter((item) => PROPERTY_TYPE_SET.has(item as PropertyTypeValue))
@@ -724,14 +1511,21 @@ export default function CrmPage() {
     page: number,
     filterOverride?: ClientFilter | null
   ) => {
+    if (!organizationId) {
+      setMatches([]);
+      setMatchesHasMore(false);
+      return;
+    }
+
     setMatchesLoading(true);
     setMatchesError(null);
     const pageSize = 8;
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url)"
+        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at)"
       )
+      .eq("org_id", organizationId)
       .eq("client_id", clientId)
       .eq("seen", false)
       .order("created_at", { ascending: false })
@@ -759,14 +1553,21 @@ export default function CrmPage() {
     page: number,
     filterOverride?: ClientFilter | null
   ) => {
+    if (!organizationId) {
+      setHistory([]);
+      setHistoryHasMore(false);
+      return;
+    }
+
     setHistoryLoading(true);
     setMatchesError(null);
     const pageSize = 8;
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url)"
+        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at)"
       )
+      .eq("org_id", organizationId)
       .eq("client_id", clientId)
       .eq("seen", true)
       .eq("is_notified", true)
@@ -795,14 +1596,21 @@ export default function CrmPage() {
     page: number,
     filterOverride?: ClientFilter | null
   ) => {
+    if (!organizationId) {
+      setArchived([]);
+      setArchivedHasMore(false);
+      return;
+    }
+
     setArchivedLoading(true);
     setMatchesError(null);
     const pageSize = 8;
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url)"
+        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at)"
       )
+      .eq("org_id", organizationId)
       .eq("client_id", clientId)
       .eq("seen", true)
       .eq("is_notified", false)
@@ -831,8 +1639,26 @@ export default function CrmPage() {
   }, []);
 
   useEffect(() => {
-    fetchClientsRef.current();
+    setIsClientSide(true);
   }, []);
+
+  useEffect(() => {
+    clearPipelineAnimationTimer();
+    setIsPipelineAnimating(false);
+    setMobileStagePickerOpen(false);
+    setPendingIndex(null);
+  }, [selectedClientId, clearPipelineAnimationTimer]);
+
+  useEffect(() => {
+    if (organizationLoading) return;
+    if (!organizationId) {
+      setClients([]);
+      setSelectedClientId(null);
+      setTimelineEvents([]);
+      return;
+    }
+    fetchClientsRef.current();
+  }, [organizationId, organizationLoading]);
 
   useEffect(() => {
     lastViewedAtRef.current = lastViewedAtByClient;
@@ -846,7 +1672,11 @@ export default function CrmPage() {
   }, [matches, history, archived]);
 
   useEffect(() => {
-    if (!selectedClientId) return;
+    if (!organizationId || !selectedClientId) {
+      setTimelineEvents([]);
+      setTimelineLoading(false);
+      return;
+    }
     setMatches([]);
     setMatchesPage(0);
     setHistory([]);
@@ -860,7 +1690,8 @@ export default function CrmPage() {
       await Promise.all([
         fetchMatchesRef.current(selectedClientId, 0, filter),
         fetchHistoryRef.current(selectedClientId, 0, filter),
-        fetchArchivedRef.current(selectedClientId, 0, filter)
+        fetchArchivedRef.current(selectedClientId, 0, filter),
+        fetchTimelineRef.current(selectedClientId)
       ]);
       if (!cancelled) {
         acknowledgeClientViewRef.current(selectedClientId);
@@ -872,9 +1703,10 @@ export default function CrmPage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedClientId]);
+  }, [organizationId, selectedClientId]);
 
   useEffect(() => {
+    if (!organizationId) return;
     if (!selectedClientId) return;
 
     realtimeRef.current?.unsubscribe();
@@ -891,16 +1723,20 @@ export default function CrmPage() {
         },
         async (payload) => {
           const newMatch = payload.new as Match;
+          if (newMatch.org_id && newMatch.org_id !== organizationId) return;
           if (newMatch.seen) return;
 
           // Realtime payload não traz join, então fazemos fetch do listing.
-          const { data: listing, error: listingError } = await supabase
+          let listingQuery = supabase
             .from("listings")
             .select(
-              "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url"
+              "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at"
             )
-            .eq("id", newMatch.listing_id)
-            .maybeSingle();
+            .eq("id", newMatch.listing_id);
+
+          listingQuery = listingQuery.or(`org_id.is.null,org_id.eq.${organizationId}`);
+
+          const { data: listing, error: listingError } = await listingQuery.maybeSingle();
 
           if (listingError) {
             console.error("Erro ao buscar listing (realtime):", listingError);
@@ -916,7 +1752,8 @@ export default function CrmPage() {
 
           if (
             !rules.isWithinPriceRange(enriched.listing) ||
-            !rules.isWithinListingRules(enriched.listing)
+            !rules.isWithinListingRules(enriched.listing) ||
+            !rules.isWithinFreshWindow(enriched.listing)
           ) {
             return;
           }
@@ -946,9 +1783,14 @@ export default function CrmPage() {
       }
       channel.unsubscribe();
     };
-  }, [selectedClientId, supabase]);
+  }, [organizationId, selectedClientId, supabase]);
 
   const handleSaveClient = async () => {
+    if (!organizationId) {
+      setClientError("Nenhuma organizacao ativa para salvar clientes.");
+      return;
+    }
+
     setClientSaving(true);
     setClientError(null);
     const trimmedName = clientDraft.name.trim();
@@ -976,6 +1818,7 @@ export default function CrmPage() {
       const { data, error } = await supabase
         .from("clients")
         .insert({
+          org_id: organizationId,
           user_id: user.id,
           name: trimmedName,
           contact_info: {
@@ -987,7 +1830,7 @@ export default function CrmPage() {
           status_pipeline: clientDraft.status_pipeline || null
         })
         .select(
-          "id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at"
+          "id, org_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at"
         )
         .single();
 
@@ -1016,7 +1859,8 @@ export default function CrmPage() {
           descricao_contexto: clientDraft.descricao_contexto || null,
           status_pipeline: clientDraft.status_pipeline || null
         })
-        .eq("id", selectedClientId);
+        .eq("id", selectedClientId)
+        .eq("org_id", organizationId);
 
       if (error) {
         setClientError(error.message);
@@ -1031,36 +1875,195 @@ export default function CrmPage() {
     setClientSaving(false);
   };
 
+  const sanitizeFilterPayload = <T extends Record<string, unknown>>(payload: T) =>
+    Object.fromEntries(
+      Object.entries(payload).filter(([, value]) => value !== undefined)
+    ) as T;
+
+  const syncMatchesFromListings = async (
+    clientId: string,
+    overrideFilter: ClientFilter
+  ) => {
+    if (!organizationId) return;
+    const { min, max } = getPriceRange(overrideFilter);
+    if (typeof min !== "number" || typeof max !== "number") return;
+    if (!Array.isArray(overrideFilter.neighborhoods) || overrideFilter.neighborhoods.length === 0) {
+      return;
+    }
+    const normalizedNeighborhoods = Array.from(
+      new Set(
+        overrideFilter.neighborhoods
+          .map((item) => normalizeText(item))
+          .filter((item) => item.length > 0)
+      )
+    );
+
+    const buildBaseListingsQuery = () => {
+      let query = supabase
+        .from("listings")
+        .select(
+          "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at"
+        )
+        .gte("price", min)
+        .lte("price", max)
+        .or(`org_id.is.null,org_id.eq.${organizationId}`);
+
+      if (normalizedNeighborhoods.length > 0) {
+        query = query.in("neighborhood_normalized", normalizedNeighborhoods);
+      } else {
+        query = query.in("neighborhood", overrideFilter.neighborhoods);
+      }
+
+      if (
+        Array.isArray(overrideFilter.property_types) &&
+        overrideFilter.property_types.length > 0
+      ) {
+        query = query.in("property_type", overrideFilter.property_types);
+      }
+
+      return query;
+    };
+
+    const maxDaysFresh = getMaxDaysFresh(overrideFilter);
+    let listingRows: Listing[] = [];
+
+    if (maxDaysFresh === null) {
+      const { data, error: listingsError } = await buildBaseListingsQuery();
+      if (listingsError) {
+        throw new Error(listingsError.message);
+      }
+      listingRows = (data as Listing[] | null) ?? [];
+    } else {
+      const cutoffIso = new Date(
+        Date.now() - maxDaysFresh * 24 * 60 * 60 * 1000
+      ).toISOString();
+
+      const [publishedQuery, createdFallbackQuery] = await Promise.all([
+        buildBaseListingsQuery().gte("published_at", cutoffIso),
+        buildBaseListingsQuery()
+          .is("published_at", null)
+          .gte("first_seen_at", cutoffIso)
+      ]);
+
+      if (publishedQuery.error) {
+        throw new Error(publishedQuery.error.message);
+      }
+      if (createdFallbackQuery.error) {
+        throw new Error(createdFallbackQuery.error.message);
+      }
+
+      const mergedRows = [
+        ...((publishedQuery.data as Listing[] | null) ?? []),
+        ...((createdFallbackQuery.data as Listing[] | null) ?? [])
+      ];
+      const dedupedById = new Map(mergedRows.map((row) => [row.id, row]));
+      listingRows = Array.from(dedupedById.values());
+    }
+
+    const matchingListings = listingRows.filter(
+      (listing) =>
+        isWithinFreshWindow(listing, overrideFilter) &&
+        isWithinListingRules(listing, overrideFilter)
+    );
+    if (matchingListings.length === 0) return;
+
+    const candidateIds = Array.from(
+      new Set(
+        matchingListings
+          .map((listing) => listing.id)
+          .filter((listingId): listingId is string => Boolean(listingId))
+      )
+    );
+    if (candidateIds.length === 0) return;
+
+    const { data: existingRows, error: existingError } = await supabase
+      .from("automated_matches")
+      .select("listing_id")
+      .eq("org_id", organizationId)
+      .eq("client_id", clientId)
+      .in("listing_id", candidateIds);
+
+    if (existingError) {
+      throw new Error(existingError.message);
+    }
+
+    const existingIds = new Set(
+      ((existingRows as { listing_id: string }[] | null) ?? []).map(
+        (row) => row.listing_id
+      )
+    );
+    const newMatches = candidateIds
+      .filter((listingId) => !existingIds.has(listingId))
+      .map((listingId) => ({
+        org_id: organizationId,
+        client_id: clientId,
+        listing_id: listingId,
+        seen: false,
+        is_notified: false
+      }));
+
+    if (newMatches.length === 0) return;
+    const { error: insertError } = await supabase
+      .from("automated_matches")
+      .insert(newMatches);
+    if (insertError) {
+      throw new Error(insertError.message);
+    }
+  };
+
   const handleSaveFilters = async () => {
-    if (!selectedClientId) return;
+    if (!selectedClientId || !organizationId) return;
     setFilterSaving(true);
     setFilterError(null);
 
     const neighborhoods = selectedNeighborhoods;
     const propertyTypes = selectedPropertyTypes;
+    const minPrice = parseBRNumber(filterDraft.min_price);
+    const maxPrice = parseBRNumber(filterDraft.max_price);
+
+    if (neighborhoods.length === 0) {
+      setFilterError("Bairro é obrigatório");
+      setFilterSaving(false);
+      return;
+    }
+
+    if (typeof minPrice !== "number" || typeof maxPrice !== "number") {
+      setFilterError("Defina preço mínimo e máximo");
+      setFilterSaving(false);
+      return;
+    }
+
+    if (minPrice > maxPrice) {
+      setFilterError("Preço mínimo não pode ser maior que máximo");
+      setFilterSaving(false);
+      return;
+    }
+
     const minBedrooms = parseMinInput(filterDraft.min_bedrooms);
     const minBathrooms = parseMinInput(filterDraft.min_bathrooms);
     const minParking = parseMinInput(filterDraft.min_parking);
     const minAreaM2 = parseMinInput(filterDraft.min_area_m2);
+    const maxAreaM2 = parseMinInput(filterDraft.max_area_m2);
+    const maxDaysFresh = parseFreshDays(filterDraft.max_days_fresh);
 
-    const basePayload: ClientFilter = {
+    const basePayload = sanitizeFilterPayload({
+      org_id: organizationId,
       client_id: selectedClientId,
       active: filterDraft.active,
-      min_price: parseBRNumber(filterDraft.min_price),
-      max_price: parseBRNumber(filterDraft.max_price),
+      min_price: minPrice,
+      max_price: maxPrice,
       neighborhoods,
-      min_bedrooms: minBedrooms,
-      max_days_fresh: filterDraft.max_days_fresh
-        ? Number(filterDraft.max_days_fresh)
-        : null,
-      property_types: propertyTypes
-    };
-    const extendedPayload: ClientFilter = {
+      min_bedrooms: minBedrooms ?? null,
+      max_days_fresh: maxDaysFresh,
+      property_types: propertyTypes.length > 0 ? propertyTypes : []
+    });
+    const extendedPayload = sanitizeFilterPayload({
       ...basePayload,
-      min_bathrooms: minBathrooms,
-      min_parking: minParking,
-      min_area_m2: minAreaM2
-    };
+      min_bathrooms: minBathrooms ?? null,
+      min_parking: minParking ?? null,
+      min_area_m2: minAreaM2 ?? null,
+      max_area_m2: maxAreaM2 ?? null
+    });
 
     let { error } = await supabase
       .from("client_filters")
@@ -1069,17 +2072,57 @@ export default function CrmPage() {
     if (error && isMissingColumnError(error.message)) {
       const fallback = await supabase
         .from("client_filters")
-        .upsert(basePayload, { onConflict: "client_id" });
+        .upsert(
+          sanitizeFilterPayload({
+            ...basePayload,
+            min_bathrooms: minBathrooms ?? null,
+            min_parking: minParking ?? null
+          }),
+          { onConflict: "client_id" }
+        );
       error = fallback.error;
+
+      if (error && isMissingColumnError(error.message)) {
+        const legacyFallback = await supabase
+          .from("client_filters")
+          .upsert(basePayload, { onConflict: "client_id" });
+        error = legacyFallback.error;
+      }
     }
 
     if (error) {
       setFilterError(error.message);
     } else if (selectedClientId) {
+      const filterForQuery: ClientFilter = {
+        org_id: organizationId,
+        client_id: selectedClientId,
+        active: filterDraft.active,
+        min_price: minPrice,
+        max_price: maxPrice,
+        neighborhoods,
+        min_bedrooms: minBedrooms,
+        min_bathrooms: minBathrooms,
+        min_parking: minParking,
+        min_area_m2: minAreaM2,
+        max_area_m2: maxAreaM2,
+        max_days_fresh: maxDaysFresh,
+        property_types: propertyTypes.length > 0 ? propertyTypes : []
+      };
+
+      try {
+        await syncMatchesFromListings(selectedClientId, filterForQuery);
+      } catch (syncError) {
+        const message =
+          syncError instanceof Error
+            ? syncError.message
+            : "Não foi possível sincronizar os matches com os listings.";
+        setFilterError(message);
+      }
+
       await Promise.all([
-        fetchMatches(selectedClientId, 0),
-        fetchHistory(selectedClientId, 0),
-        fetchArchived(selectedClientId, 0)
+        fetchMatches(selectedClientId, 0, filterForQuery),
+        fetchHistory(selectedClientId, 0, filterForQuery),
+        fetchArchived(selectedClientId, 0, filterForQuery)
       ]);
     }
 
@@ -1090,6 +2133,11 @@ export default function CrmPage() {
     match: Match,
     action: "curate" | "archive" | "delete"
   ) => {
+    if (!organizationId) {
+      setMatchesError("Nenhuma organizacao ativa para atualizar matches.");
+      return;
+    }
+
     setMatchesError(null);
     setMatches((prev) => prev.filter((item) => item.id !== match.id));
 
@@ -1097,7 +2145,8 @@ export default function CrmPage() {
       const { error } = await supabase
         .from("automated_matches")
         .delete()
-        .eq("id", match.id);
+        .eq("id", match.id)
+        .eq("org_id", organizationId);
 
       if (error) {
         setMatchesError(error.message);
@@ -1113,7 +2162,8 @@ export default function CrmPage() {
           seen: true,
           is_notified: isNotified
         })
-        .eq("id", match.id);
+        .eq("id", match.id)
+        .eq("org_id", organizationId);
 
       if (error) {
         setMatchesError(error.message);
@@ -1137,6 +2187,11 @@ export default function CrmPage() {
     match: Match,
     action: "archive" | "delete"
   ) => {
+    if (!organizationId) {
+      setMatchesError("Nenhuma organizacao ativa para atualizar curadoria.");
+      return;
+    }
+
     setMatchesError(null);
     setHistory((prev) => prev.filter((item) => item.id !== match.id));
 
@@ -1144,7 +2199,8 @@ export default function CrmPage() {
       const { error } = await supabase
         .from("automated_matches")
         .delete()
-        .eq("id", match.id);
+        .eq("id", match.id)
+        .eq("org_id", organizationId);
 
       if (error) {
         setMatchesError(error.message);
@@ -1156,7 +2212,8 @@ export default function CrmPage() {
       const { error } = await supabase
         .from("automated_matches")
         .update({ seen: true, is_notified: false })
-        .eq("id", match.id);
+        .eq("id", match.id)
+        .eq("org_id", organizationId);
 
       if (error) {
         setMatchesError(error.message);
@@ -1180,7 +2237,7 @@ export default function CrmPage() {
   };
 
   const handleRemoveClient = async () => {
-    if (!selectedClientId) return;
+    if (!selectedClientId || !organizationId) return;
     const confirmDelete = window.confirm(
       "Tem certeza que deseja remover este client? Essa ação não pode ser desfeita."
     );
@@ -1188,7 +2245,8 @@ export default function CrmPage() {
     const { error } = await supabase
       .from("clients")
       .delete()
-      .eq("id", selectedClientId);
+      .eq("id", selectedClientId)
+      .eq("org_id", organizationId);
 
     if (error) {
       setClientError(error.message);
@@ -1231,18 +2289,32 @@ export default function CrmPage() {
     }).length;
   }, [clients]);
 
+  if (!organizationId && !organizationLoading && !needsOrganizationChoice) {
+    return (
+      <div className="space-y-6">
+        <Card className="border-red-500/40 bg-red-500/10 text-sm text-red-200">
+          {organizationError ??
+            "Nao encontramos uma organizacao ativa para esta conta."}
+        </Card>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-8">
+    <div className="min-w-0 space-y-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
+        <div className="min-w-0">
           <h2 className="text-2xl font-semibold">CRM</h2>
-          <p className="text-sm text-zinc-400">
+          <p className="break-words text-sm text-zinc-400">
             Gerencie clientes, filtros e matches em tempo real.
+            {organizationContext
+              ? ` Organizacao ativa: ${organizationContext.organization.name}.`
+              : ""}
           </p>
         </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
+      <div className="grid min-w-0 gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
         <Card className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
@@ -1325,7 +2397,7 @@ export default function CrmPage() {
           </div>
         </Card>
 
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           <Card className="space-y-4">
             <div>
               <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
@@ -1342,23 +2414,147 @@ export default function CrmPage() {
               <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
                 Pipeline
               </p>
-              <div className="flex flex-wrap gap-2">
-                {PIPELINE_STEPS.map((step) => {
-                  const active = clientDraft.status_pipeline === step.value;
-                  return (
-                    <button
-                      key={step.value}
+              <div className="rounded-xl border border-zinc-800 bg-black/50 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-500">
+                  <span>Etapa atual: {getStatusLabel(confirmedPipelineStatus)}</span>
+                  <div className="flex min-w-0 flex-wrap items-center gap-3 text-zinc-400">
+                    {statusModalOpen && pendingIndex !== null ? (
+                      <span>
+                        Selecionado:{" "}
+                        {PIPELINE_STEPS[pendingIndex]?.label ?? "Etapa pendente"}
+                      </span>
+                    ) : null}
+                    {confirmedPipelineStatus === "fechado" ? (
+                      <span className="text-zinc-300">
+                        {selectedClient?.closed_outcome === "won"
+                          ? "Fechado (Ganho)"
+                          : selectedClient?.closed_outcome === "lost"
+                            ? "Fechado (Perdido)"
+                            : "Fechado"}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="space-y-3 lg:hidden">
+                  <div className="flex items-start justify-between gap-3 rounded-xl border border-zinc-800 bg-black/60 p-3">
+                    <div>
+                      <p className="text-[11px] text-zinc-500">Etapa atual</p>
+                      <p className="mt-1 text-sm font-semibold text-zinc-100">
+                        {getStatusLabel(displayPipelineStatus)}
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300">
+                      {displayIndex + 1}/{PIPELINE_STEPS.length}
+                    </span>
+                  </div>
+
+                  <div className="relative h-2 overflow-hidden rounded-full bg-zinc-800/90">
+                    <motion.div
+                      className="absolute inset-y-0 left-0 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.45)]"
+                      animate={{ width: `${pipelineProgressPercent}%` }}
+                      transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
                       type="button"
-                      onClick={() => handlePipelineChange(step.value)}
-                      className={`rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.3em] transition ${active
-                        ? "border-white bg-white text-black"
-                        : "border-zinc-800 text-zinc-400 hover:text-white"
-                        }`}
+                      variant="secondary"
+                      disabled={
+                        statusModalSaving ||
+                        isPipelineAnimating ||
+                        isCreatingClient ||
+                        !selectedClientId
+                      }
+                      onClick={() => setMobileStagePickerOpen(true)}
                     >
-                      {step.label}
-                    </button>
-                  );
-                })}
+                      Alterar etapa
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={
+                        statusModalSaving ||
+                        isPipelineAnimating ||
+                        isCreatingClient ||
+                        !selectedClientId
+                      }
+                      onClick={() => handlePipelineChange(confirmedPipelineStatus)}
+                    >
+                      Registrar atividade
+                    </Button>
+                  </div>
+                </div>
+
+                <div ref={pipelineChipsRef} className="relative hidden pb-6 pt-1 lg:block">
+                  {pipelineTrack.ready ? (
+                    <>
+                      <div
+                        className="pointer-events-none absolute z-0 h-1 rounded-full bg-zinc-800/90"
+                        style={{
+                          left: pipelineTrack.start,
+                          top: pipelineTrack.top,
+                          width: pipelineTrack.width
+                        }}
+                      />
+                      <motion.div
+                        className="pointer-events-none absolute z-0 h-1 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.35)]"
+                        animate={{
+                          left: pipelineTrack.start,
+                          top: pipelineTrack.top,
+                          width: pipelineTrack.fill
+                        }}
+                        transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                      />
+                      <motion.span
+                        className="pointer-events-none absolute z-0 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-zinc-900 bg-white shadow-[0_0_14px_rgba(255,255,255,0.65)]"
+                        animate={{
+                          left: pipelineTrack.start + pipelineTrack.fill,
+                          top: pipelineTrack.top + 0.5
+                        }}
+                        transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                      />
+                    </>
+                  ) : null}
+
+                  <div className="relative z-10 grid grid-cols-6 gap-2">
+                    {PIPELINE_STEPS.map((step) => {
+                      const stepIndex = PIPELINE_INDEX_BY_STATUS[step.value];
+                      const isCompleted = stepIndex < displayIndex;
+                      const isActive = stepIndex === displayIndex;
+                      return (
+                        <button
+                          key={step.value}
+                          ref={(element) => {
+                            pipelineButtonRefs.current[step.value] = element;
+                          }}
+                          type="button"
+                          onClick={() => handlePipelineChange(step.value)}
+                          disabled={
+                            statusModalSaving ||
+                            isPipelineAnimating ||
+                            isCreatingClient ||
+                            !selectedClientId
+                          }
+                          aria-current={isActive ? "step" : undefined}
+                          className={`min-w-0 rounded-xl border px-2 py-2 text-center text-[10px] font-semibold leading-tight transition ${isActive
+                            ? "border-white bg-white text-black ring-1 ring-white/70 shadow-[0_0_0_1px_rgba(255,255,255,0.2)]"
+                            : isCompleted
+                              ? "border-white/90 bg-white text-black shadow-[0_0_0_1px_rgba(255,255,255,0.12)]"
+                              : "border-zinc-700 bg-black/70 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                            }`}
+                        >
+                          {step.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <p className="mt-2 text-[11px] text-zinc-500">
+                  A animação do pipeline só roda depois da confirmação salva com sucesso.
+                </p>
               </div>
             </div>
 
@@ -1456,6 +2652,99 @@ export default function CrmPage() {
             <Card className="space-y-4">
               <div>
                 <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                  Histórico
+                </p>
+                <h3 className="mt-2 text-lg font-semibold">Timeline do CRM</h3>
+              </div>
+
+              {timelineError ? (
+                <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                  {timelineError}
+                </p>
+              ) : null}
+
+              {timelineLoading && timelineEvents.length === 0 ? (
+                <div className="h-24 rounded-xl border border-zinc-800 bg-white/5 animate-pulse" />
+              ) : null}
+
+              {!timelineLoading && timelineEvents.length === 0 ? (
+                <p className="text-sm text-zinc-500">
+                  Sem eventos ainda para este cliente.
+                </p>
+              ) : null}
+
+              <div className="space-y-3">
+                {timelineEvents.map((event) => {
+                  const payload =
+                    event.payload && typeof event.payload === "object"
+                      ? (event.payload as TimelinePayload)
+                      : null;
+
+                  return (
+                    <div
+                      key={event.id}
+                      className="rounded-xl border border-zinc-800 bg-black/50 px-4 py-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium text-zinc-100">
+                            {event.from_status ? getStatusLabel(event.from_status) : "—"} →{" "}
+                            {event.to_status ? getStatusLabel(event.to_status) : "—"}
+                          </p>
+                          <p className="text-xs text-zinc-500">
+                            {formatDateTimeDisplay(event.created_at)}
+                          </p>
+                          {event.actor_user_id ? (
+                            <p className="text-[11px] text-zinc-600">
+                              Usuário: {event.actor_user_id}
+                            </p>
+                          ) : null}
+                        </div>
+                        <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-zinc-400">
+                          {event.event_type}
+                        </span>
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-400">
+                        {payload?.next_action ? (
+                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
+                            Próxima ação: {getNextActionLabel(payload.next_action)}
+                          </span>
+                        ) : null}
+                        {payload?.next_followup_at ? (
+                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
+                            Follow-up: {formatDateTimeDisplay(payload.next_followup_at)}
+                          </span>
+                        ) : null}
+                        {payload?.closed_outcome ? (
+                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
+                            Resultado:{" "}
+                            {payload.closed_outcome === "won"
+                              ? "Ganho"
+                              : "Perdido"}
+                          </span>
+                        ) : null}
+                        {payload?.lost_reason ? (
+                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
+                            Motivo perda: {getLostReasonLabel(payload.lost_reason)}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {payload?.note ? (
+                        <p className="mt-2 text-xs text-zinc-300">{payload.note}</p>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          ) : null}
+
+          {selectedClientId ? (
+            <Card className="space-y-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
                   Filtros
                 </p>
                 <h3 className="mt-2 text-lg font-semibold">Preferências</h3>
@@ -1513,6 +2802,7 @@ export default function CrmPage() {
                   label="Bairro"
                   placeholder="Digite para buscar bairros"
                   city="Campinas"
+                  organizationId={organizationId}
                   value={neighborhoodInput}
                   onChange={setNeighborhoodInput}
                   onSelect={(item) => {
@@ -1602,8 +2892,24 @@ export default function CrmPage() {
                 />
                 <Input
                   type="number"
-                  min={1}
-                  placeholder="Dias frescos"
+                  min={0}
+                  placeholder="Área máx. (m2)"
+                  value={filterDraft.max_area_m2}
+                  onChange={(event) =>
+                    setFilterDraft((prev) => ({
+                      ...prev,
+                      max_area_m2: event.target.value
+                    }))
+                  }
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="crm-fresh-days" className="text-xs text-zinc-500">
+                  Buscar imóveis dos últimos
+                </label>
+                <select
+                  id="crm-fresh-days"
                   value={filterDraft.max_days_fresh}
                   onChange={(event) =>
                     setFilterDraft((prev) => ({
@@ -1611,7 +2917,17 @@ export default function CrmPage() {
                       max_days_fresh: event.target.value
                     }))
                   }
-                />
+                  className="w-full appearance-none rounded-xl border border-zinc-700/70 bg-zinc-950/50 px-3.5 py-2.5 text-sm text-zinc-100 transition-colors hover:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/20"
+                >
+                  {FRESHNESS_OPTIONS.map((option) => (
+                    <option key={option.label} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-500">
+                  Buscar imóveis dos últimos: 7/15/30 dias (ou todos).
+                </p>
               </div>
 
               <div className="space-y-2">
@@ -1650,7 +2966,7 @@ export default function CrmPage() {
 
           {selectedClientId ? (
             <Card className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                 <div>
                   <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
                     Matches
@@ -1950,7 +3266,10 @@ export default function CrmPage() {
                           </Button>
                           <Button
                             variant="ghost"
-                            onClick={() => handlePipelineChange("visita_agendada")}
+                            disabled={statusModalSaving || isPipelineAnimating}
+                            onClick={() =>
+                              handlePipelineChange("visita_agendada", "card")
+                            }
                           >
                             📅
                           </Button>
@@ -2068,6 +3387,409 @@ export default function CrmPage() {
           ) : null}
         </div>
       </div>
+
+      {isClientSide
+        ? createPortal(
+          <>
+            <AnimatePresence>
+              {mobileStagePickerOpen ? (
+                <motion.div
+                  className="fixed inset-0 z-[150] flex items-end justify-center lg:hidden"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                >
+                  <button
+                    type="button"
+                    aria-label="Fechar seletor de etapa"
+                    className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+                    onClick={() => setMobileStagePickerOpen(false)}
+                  />
+                  <motion.div
+                    className="relative z-10 w-full max-h-[85vh] overflow-y-auto rounded-t-2xl border border-zinc-800 bg-zinc-950 p-4 pb-6 shadow-2xl"
+                    initial={{ y: 36, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    exit={{ y: 36, opacity: 0 }}
+                    transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="mx-auto mb-3 h-1.5 w-14 rounded-full bg-zinc-700" />
+                    <div className="mb-3">
+                      <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                        Alterar etapa
+                      </p>
+                      <h3 className="mt-2 text-lg font-semibold">
+                        Escolha a nova etapa do pipeline
+                      </h3>
+                    </div>
+
+                    <div className="space-y-2">
+                      {PIPELINE_STEPS.map((step, index) => {
+                        const isCompleted = index < displayIndex;
+                        const isActive = index === displayIndex;
+                        return (
+                          <button
+                            key={step.value}
+                            type="button"
+                            disabled={statusModalSaving || isPipelineAnimating}
+                            onClick={() => handlePipelineChange(step.value)}
+                            className={`flex w-full items-start gap-3 rounded-xl border px-3 py-3 text-left transition ${isActive
+                              ? "border-white bg-white text-black"
+                              : isCompleted
+                                ? "border-white/80 bg-white/90 text-black"
+                                : "border-zinc-700 bg-black/70 text-zinc-200"
+                              }`}
+                          >
+                            <span
+                              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold ${isActive || isCompleted
+                                ? "border-black/50 bg-black/10 text-black"
+                                : "border-zinc-500 text-zinc-300"
+                                }`}
+                            >
+                              {isCompleted ? "✓" : index + 1}
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block text-sm font-semibold">
+                                {step.label}
+                              </span>
+                              <span
+                                className={`mt-0.5 block text-[11px] ${isActive || isCompleted
+                                  ? "text-black/70"
+                                  : "text-zinc-500"
+                                  }`}
+                              >
+                                {isActive
+                                  ? "Etapa atual (registrar atividade também disponível)"
+                                  : isCompleted
+                                    ? "Etapa já concluída"
+                                    : "Etapa futura"}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-4 flex justify-end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={() => setMobileStagePickerOpen(false)}
+                      >
+                        Fechar
+                      </Button>
+                    </div>
+                  </motion.div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {statusModalOpen ? (
+                <motion.div
+                  className="fixed inset-0 z-[160] flex items-center justify-center p-4"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                >
+                  <button
+                    type="button"
+                    aria-label="Fechar modal"
+                    className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+                    onClick={closeStatusTransitionModal}
+                  />
+                  <motion.div
+                    className="relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950/95 p-5 shadow-2xl"
+                    initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 20, scale: 0.98 }}
+                    transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+              <div className="mb-4">
+                <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                  {statusModalIsActivityOnly ? "Registrar atividade" : "Atualizar pipeline"}
+                </p>
+                <h3 className="mt-2 text-lg font-semibold">
+                  {statusModalIsActivityOnly
+                    ? `${getStatusLabel(statusModalTarget)} · Registrar atividade`
+                    : `${getStatusLabel(statusModalFrom)} → ${getStatusLabel(statusModalTarget)}`}
+                </h3>
+                <p className="mt-1 text-xs text-zinc-500">
+                  {statusModalIsActivityOnly
+                    ? "Atualize próxima ação, follow-up e notas sem mudar a etapa."
+                    : "Registre próxima ação, follow-up e detalhes da etapa."}
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-xs text-zinc-500">Próxima ação</label>
+                    <select
+                      value={transitionDraft.next_action}
+                      onChange={(event) =>
+                        setTransitionDraft((prev) => ({
+                          ...prev,
+                          next_action: event.target.value as NextActionValue | ""
+                        }))
+                      }
+                      className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-white/30"
+                    >
+                      <option value="">Selecione</option>
+                      {NEXT_ACTION_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs text-zinc-500">Próximo follow-up</label>
+                    <Input
+                      type="datetime-local"
+                      value={transitionDraft.next_followup_at}
+                      disabled={transitionDraft.no_followup_date}
+                      onChange={(event) =>
+                        setTransitionDraft((prev) => ({
+                          ...prev,
+                          next_followup_at: event.target.value
+                        }))
+                      }
+                    />
+                    <label className="flex items-center gap-2 text-xs text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={transitionDraft.no_followup_date}
+                        onChange={(event) =>
+                          setTransitionDraft((prev) => ({
+                            ...prev,
+                            no_followup_date: event.target.checked,
+                            next_followup_at: event.target.checked
+                              ? ""
+                              : prev.next_followup_at
+                          }))
+                        }
+                      />
+                      Sem data por enquanto
+                    </label>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs text-zinc-500">Nota curta</label>
+                  <textarea
+                    value={transitionDraft.note}
+                    onChange={(event) =>
+                      setTransitionDraft((prev) => ({
+                        ...prev,
+                        note: event.target.value
+                      }))
+                    }
+                    rows={2}
+                    placeholder="Contexto rápido da mudança"
+                    className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/30"
+                  />
+                </div>
+
+                {statusModalTarget === "visita_agendada" ? (
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                      Dados da visita
+                    </p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <Input
+                        type="datetime-local"
+                        value={transitionDraft.visit_at}
+                        onChange={(event) =>
+                          setTransitionDraft((prev) => ({
+                            ...prev,
+                            visit_at: event.target.value
+                          }))
+                        }
+                      />
+                      <Input
+                        placeholder="Local/observação rápida"
+                        value={transitionDraft.visit_notes}
+                        onChange={(event) =>
+                          setTransitionDraft((prev) => ({
+                            ...prev,
+                            visit_notes: event.target.value
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+                ) : null}
+
+                {statusModalTarget === "proposta" ? (
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                      Dados da proposta
+                    </p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <Input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        placeholder="Valor da proposta"
+                        value={transitionDraft.proposal_value}
+                        onChange={(event) =>
+                          setTransitionDraft((prev) => ({
+                            ...prev,
+                            proposal_value: event.target.value
+                          }))
+                        }
+                      />
+                      <Input
+                        type="date"
+                        value={transitionDraft.proposal_valid_until}
+                        onChange={(event) =>
+                          setTransitionDraft((prev) => ({
+                            ...prev,
+                            proposal_valid_until: event.target.value
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+                ) : null}
+
+                {statusModalTarget === "fechado" ? (
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                      Resultado final
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {CLOSED_OUTCOME_OPTIONS.map((option) => {
+                        const active = transitionDraft.closed_outcome === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() =>
+                              setTransitionDraft((prev) => ({
+                                ...prev,
+                                closed_outcome: option.value,
+                                lost_reason:
+                                  option.value === "lost" ? prev.lost_reason : "",
+                                lost_reason_detail:
+                                  option.value === "lost" ? prev.lost_reason_detail : ""
+                              }))
+                            }
+                            className={`rounded-full border px-3 py-1 text-xs uppercase tracking-[0.2em] transition ${active
+                              ? "border-white bg-white text-black"
+                              : "border-zinc-700 text-zinc-300 hover:text-white"
+                              }`}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {transitionDraft.closed_outcome === "won" ? (
+                      <div className="mt-3 grid gap-3 md:grid-cols-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          placeholder="Valor final (opcional)"
+                          value={transitionDraft.final_value}
+                          onChange={(event) =>
+                            setTransitionDraft((prev) => ({
+                              ...prev,
+                              final_value: event.target.value
+                            }))
+                          }
+                        />
+                        <Input
+                          placeholder="Nota final (opcional)"
+                          value={transitionDraft.final_note}
+                          onChange={(event) =>
+                            setTransitionDraft((prev) => ({
+                              ...prev,
+                              final_note: event.target.value
+                            }))
+                          }
+                        />
+                      </div>
+                    ) : null}
+
+                    {transitionDraft.closed_outcome === "lost" ? (
+                      <div className="mt-3 space-y-3">
+                        <select
+                          value={transitionDraft.lost_reason}
+                          onChange={(event) =>
+                            setTransitionDraft((prev) => ({
+                              ...prev,
+                              lost_reason: event.target.value as LostReasonValue | ""
+                            }))
+                          }
+                          className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-white/30"
+                        >
+                          <option value="">Motivo da perda</option>
+                          {LOST_REASON_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <textarea
+                          value={transitionDraft.lost_reason_detail}
+                          onChange={(event) =>
+                            setTransitionDraft((prev) => ({
+                              ...prev,
+                              lost_reason_detail: event.target.value
+                            }))
+                          }
+                          rows={2}
+                          placeholder="Detalhe do motivo (opcional)"
+                          className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/30"
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+
+              {statusModalError ? (
+                <p className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                  {statusModalError}
+                </p>
+              ) : null}
+
+              <div className="mt-5 flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={closeStatusTransitionModal}
+                  disabled={statusModalSaving}
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={handleConfirmStatusTransition}
+                  disabled={statusModalSaving}
+                >
+                  {statusModalSaving
+                    ? "Salvando..."
+                    : statusModalIsActivityOnly
+                      ? "Salvar atividade"
+                      : "Confirmar mudança"}
+                </Button>
+              </div>
+                </motion.div>
+              </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </>,
+          document.body
+        )
+        : null}
     </div>
   );
 }

@@ -27,6 +27,7 @@ type NeighborhoodAutocompleteProps = {
   onClear?: () => void;
   placeholder?: string;
   city?: string;
+  organizationId?: string | null;
   disabled?: boolean;
   minChars?: number;
   debounceMs?: number;
@@ -134,6 +135,7 @@ export default function NeighborhoodAutocomplete({
   onClear,
   placeholder = "Digite o bairro",
   city,
+  organizationId,
   disabled,
   minChars = 2,
   debounceMs = 200,
@@ -278,6 +280,12 @@ export default function NeighborhoodAutocomplete({
             listingsQuery = listingsQuery.ilike("city", cityFilter);
           }
 
+          if (organizationId) {
+            listingsQuery = listingsQuery.or(
+              `org_id.is.null,org_id.eq.${organizationId}`
+            );
+          }
+
           const { data: fallbackData, error: fallbackError } = await listingsQuery;
 
           if (requestRef.current !== requestId) return;
@@ -330,6 +338,7 @@ export default function NeighborhoodAutocomplete({
     minChars,
     minLengthReached,
     normalizedQuery,
+    organizationId,
     supabase
   ]);
 
