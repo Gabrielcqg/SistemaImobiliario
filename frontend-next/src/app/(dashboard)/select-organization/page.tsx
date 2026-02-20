@@ -106,7 +106,7 @@ export default function SelectOrganizationPage() {
                 type="button"
                 onClick={() => void handleSelect(organization.organizationId)}
                 disabled={Boolean(savingOrganizationId)}
-                className="flex w-full items-center justify-between rounded-lg border border-zinc-800 px-4 py-3 text-left transition hover:border-zinc-600 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-70"
+                className="accent-outline accent-sheen accent-focus flex w-full items-center justify-between rounded-lg px-4 py-3 text-left transition hover:text-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-70"
               >
                 <div>
                   <p className="text-sm font-medium text-zinc-100">

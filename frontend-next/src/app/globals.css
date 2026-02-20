@@ -5,14 +5,70 @@
 @layer base {
   :root {
     color-scheme: dark;
+
+    /* --- New Design System: Dark Mode Palette --- */
+    /* Base Backgrounds */
+    --bg-app: #0B0D10;
+    /* Deep Charcoal (Main BG) */
+    --surface-base: #12161C;
+    /* Card BG (Level 1) */
+    --surface-lifted: #181C24;
+    /* Hover/Modal BG (Level 2) */
+    --surface-highlight: #21262D;
+    /* Borders/Separators */
+
+    /* Text Colors */
+    --text-primary: #EDF2F7;
+    /* High Emphasis (Off-white) */
+    --text-secondary: #A0AEC0;
+    /* Medium Emphasis (Blue-grey) */
+    --text-tertiary: #718096;
+    /* Low Emphasis */
+
+    /* Borders */
+    --border-subtle: rgba(240, 246, 252, 0.08);
+    --border-default: rgba(240, 246, 252, 0.12);
+    --border-highlight: rgba(240, 246, 252, 0.18);
+
+    /* --- BRAND: Teal/Cyan (Neutral Tech) --- */
+    --brand-primary: #22D3EE;
+    /* Cyan-400 */
+    --brand-secondary: #06B6D4;
+    /* Cyan-500 */
+    --brand-dark: #0891B2;
+    /* Cyan-600 */
+
+    /* Subtle Brand Glow */
+    --brand-glow: 0 0 20px rgba(34, 211, 238, 0.15);
+
+    /* Status Colors */
+    --status-success: #10B981;
+    --status-warn: #F59E0B;
+    --status-error: #EF4444;
+
+    /* Interaction LED Colors */
+    --led-orange: var(--status-warn);
+    --led-cyan: var(--brand-primary);
+
+    /* Legacy variables kept for compatibility */
+    --accent-primary: #00c8ff;
+    --accent-secondary: #ff8a00;
+    --accent-amber: 245 158 11;
+    --accent-teal: 45 212 191;
+    --accent-blue: 56 189 248;
+    --accent-violet: 99 102 241;
   }
 
   * {
     @apply border-zinc-800;
+    /* Default border color fallback */
+    box-sizing: border-box;
   }
 
   body {
-    @apply bg-black text-white antialiased;
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    @apply antialiased;
   }
 
   html,
@@ -30,8 +86,679 @@
   }
 }
 
+@keyframes accent-sheen {
+  from {
+    transform: translateX(-260%) skewX(-24deg);
+  }
+
+  to {
+    transform: translateX(360%) skewX(-24deg);
+  }
+}
+
+@keyframes accent-pulse {
+  0% {
+    box-shadow: var(--accent-glow-subtle);
+  }
+
+  60% {
+    box-shadow: var(--accent-glow-normal);
+  }
+
+  100% {
+    box-shadow: var(--accent-glow-subtle);
+  }
+}
+
 @layer components {
+
+  /* --- Utility Classes for Design System --- */
+  .text-secondary {
+    color: var(--text-secondary);
+  }
+
+  .bg-surface {
+    background-color: var(--surface-base);
+  }
+
+  .bg-surface-lifted {
+    background-color: var(--surface-lifted);
+  }
+
+  /* --- New Standard Button Base --- */
+  /* Replaces old .rim-core and .btn-led */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    /* Restore original sizing logic: height and padding are set by utility classes or variants */
+    font-weight: 500;
+    line-height: 1;
+    border-radius: 9999px;
+    /* Pill shape by default */
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
+    text-decoration: none;
+    isolation: isolate;
+
+    /* Default state: Quiet */
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid transparent;
+  }
+
+  /* Interaction Modifier: The "LED" Effect */
+  /* Only applied when we want the hover/focus glow */
+  .btn-led-interaction {
+    overflow: visible;
+    /* Needed for outer glow */
+  }
+
+  /* 1. Gradient Ring (Hidden by default) */
+  .btn-led-interaction::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    /* Hugs the border */
+    border-radius: inherit;
+    padding: 1px;
+    /* Thin border */
+    background: linear-gradient(90deg, var(--led-orange), var(--led-cyan));
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+
+    opacity: 0;
+    /* Hidden idle */
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  /* 2. Outer Glow (Hidden by default) */
+  .btn-led-interaction::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+    /* Reset */
+    opacity: 0;
+    transition: all 0.3s ease;
+    z-index: -1;
+  }
+
+  /* --- Hover State --- */
+  .btn-led-interaction:hover {
+    color: #fff;
+    transform: translateY(-1px);
+  }
+
+  .btn-led-interaction:hover::before {
+    opacity: 1;
+    /* Show Ring */
+  }
+
+  .btn-led-interaction:hover::after {
+    opacity: 0.6;
+    /* Soft cyan/orange glow mix */
+    box-shadow:
+      0 0 12px rgba(0, 200, 255, 0.4),
+      0 0 20px rgba(255, 138, 0, 0.2);
+  }
+
+  /* Fixed active state: same LED contour used on hovered sidebar buttons. */
+  .btn-led-interaction.is-active-fixed {
+    color: #fff;
+    transform: none;
+  }
+
+  .btn-led-interaction.is-active-fixed::before {
+    opacity: 1;
+  }
+
+  .btn-led-interaction.is-active-fixed::after {
+    opacity: 0.6;
+    box-shadow:
+      0 0 12px rgba(0, 200, 255, 0.4),
+      0 0 20px rgba(255, 138, 0, 0.2);
+  }
+
+  .btn-led-interaction.is-active-fixed:hover {
+    transform: none;
+  }
+
+  /* --- Focus Visible (Accessibility) --- */
+  .btn-led-interaction:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--led-cyan);
+  }
+
+  /* --- Active State (Press) --- */
+  .btn-led-interaction:active {
+    transform: scale(0.97) translateY(0);
+  }
+
+  .btn-led-interaction:active::after {
+    opacity: 0.3;
+    box-shadow: 0 0 8px rgba(0, 200, 255, 0.5);
+  }
+
+  /* --- Variants --- */
+
+  /* Solid: Dark background, subtle border */
+  .btn-solid {
+    background: var(--surface-lifted);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-primary);
+  }
+
+  .btn-solid:hover {
+    background: var(--surface-highlight);
+    border-color: transparent;
+    /* Ring takes over */
+  }
+
+  /* Ghost: Transparent, hover brings background */
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+  }
+
+  .btn-ghost:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  /* Nav: Special variant for Sidebar */
+  .btn-nav {
+    justify-content: flex-start;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    width: 100%;
+    color: var(--text-secondary);
+    border-radius: 8px;
+    /* Slightly less rounded than pills for sidebar items? Or keep pill? User asked for original format. */
+    /* Let's stick to base .btn radius which is 9999px usually for buttons, but sidebar might be rounded-lg. We'll override in component if needed. */
+  }
+
+  /* CTA: Primary Action */
+  .btn-cta {
+    background: linear-gradient(180deg, rgba(22, 27, 34, 1) 0%, rgba(13, 17, 23, 1) 100%);
+    border: 1px solid var(--border-highlight);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Sizes */
+  .btn-sm {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+
+  .btn-md {
+    height: 40px;
+    padding: 0 16px;
+    font-size: 14px;
+  }
+
+  .btn-lg {
+    height: 48px;
+    padding: 0 24px;
+    font-size: 16px;
+  }
+
+  .btn-icon {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Legacy/Compatibility Shim: Map old classes to new structure if they exist in markup we haven't touched */
+  .rim-core,
+  .rim-primary,
+  .rim-secondary,
+  .rim-ghost {
+    /* Rough reset */
+    position: relative;
+  }
+
+  /* --- Misc --- */
   .glass {
-    @apply bg-white/5 backdrop-blur-md border border-zinc-800 shadow-glow;
+    @apply bg-white/5 backdrop-blur-md border border-white/10 shadow-sm;
+  }
+
+  .accent-focus {
+    transition: border-color 180ms ease, box-shadow 220ms ease;
+  }
+
+  .accent-focus:focus-visible {
+    outline: none;
+    border-color: rgba(255, 255, 255, 0.24);
+    box-shadow: var(--accent-focus-ring);
+  }
+
+  .accent-sheen {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .accent-sheen::after {
+    content: "";
+    position: absolute;
+    inset: -40% auto -40% -22%;
+    width: 30%;
+    pointer-events: none;
+    background: linear-gradient(90deg,
+        transparent 0%,
+        rgba(255, 255, 255, 0.22) 50%,
+        transparent 100%);
+    transform: translateX(-260%) skewX(-24deg);
+    opacity: 0;
+  }
+
+  .accent-sheen:hover::after,
+  .accent-sheen:focus-visible::after {
+    opacity: 1;
+    animation: accent-sheen 900ms ease forwards;
+  }
+
+  .accent-outline,
+  .accent-pill {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(180deg,
+        rgba(39, 40, 47, 0.9) 0%,
+        rgba(17, 19, 27, 0.92) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.74) 0%,
+        rgba(var(--accent-violet), 0.68) 42%,
+        rgba(var(--accent-blue), 0.74) 100%) border-box;
+    color: rgb(228 228 231);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 0 0 1px rgba(255, 255, 255, 0.08),
+      0 10px 24px -18px rgba(0, 0, 0, 0.96);
+    transition:
+      transform 140ms ease,
+      filter 180ms ease,
+      box-shadow 220ms ease,
+      background-position 240ms ease;
+  }
+
+  .accent-outline:hover,
+  .accent-pill:hover {
+    filter: brightness(1.08);
+    box-shadow: var(--accent-glow-normal);
+    background-position: 52% 48%;
+  }
+
+  .accent-fill,
+  .accent-pill-active {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(180deg,
+        rgba(14, 16, 24, 0.32) 0%,
+        rgba(6, 8, 14, 0.56) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.3) 0%,
+        rgba(var(--accent-violet), 0.28) 45%,
+        rgba(var(--accent-blue), 0.32) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.9) 0%,
+        rgba(var(--accent-violet), 0.84) 45%,
+        rgba(var(--accent-blue), 0.9) 100%) border-box;
+    color: rgb(240 249 255);
+    box-shadow:
+      var(--accent-glow-subtle),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    background-size: 100% 100%, 140% 140%, 145% 145%;
+    background-position: 50% 50%, 50% 50%, 50% 50%;
+    transition:
+      transform 140ms ease,
+      filter 180ms ease,
+      box-shadow 220ms ease,
+      background-position 240ms ease;
+  }
+
+  .accent-fill:hover,
+  .accent-pill-active:hover {
+    filter: brightness(1.08);
+    box-shadow:
+      var(--accent-glow-normal),
+      inset 0 1px 0 rgba(255, 255, 255, 0.16);
+    background-position: 50% 50%, 56% 46%, 58% 44%;
+  }
+
+  .accent-fill:active,
+  .accent-pill-active:active,
+  .accent-outline:active,
+  .accent-pill:active {
+    transform: translateY(1px) scale(0.99);
+    animation: accent-pulse 260ms ease-out;
+  }
+
+  .accent-badge {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(180deg,
+        rgba(12, 14, 20, 0.25) 0%,
+        rgba(6, 8, 14, 0.46) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.28) 0%,
+        rgba(var(--accent-violet), 0.26) 50%,
+        rgba(var(--accent-blue), 0.3) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.84) 0%,
+        rgba(var(--accent-violet), 0.78) 50%,
+        rgba(var(--accent-blue), 0.84) 100%) border-box;
+    color: rgb(240 249 255);
+    box-shadow: var(--accent-glow-subtle);
+  }
+
+  .accent-fill-subtle {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(180deg,
+        rgba(11, 13, 20, 0.44) 0%,
+        rgba(6, 8, 13, 0.62) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.18) 0%,
+        rgba(var(--accent-violet), 0.16) 52%,
+        rgba(var(--accent-blue), 0.2) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.7) 0%,
+        rgba(var(--accent-violet), 0.62) 52%,
+        rgba(var(--accent-blue), 0.72) 100%) border-box;
+    color: rgb(224 242 254);
+    box-shadow: var(--accent-glow-subtle);
+  }
+
+  .accent-alert {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(180deg,
+        rgba(11, 13, 20, 0.48) 0%,
+        rgba(6, 8, 13, 0.68) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.12) 0%,
+        rgba(var(--accent-violet), 0.1) 52%,
+        rgba(var(--accent-blue), 0.12) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.68) 0%,
+        rgba(var(--accent-violet), 0.6) 52%,
+        rgba(var(--accent-blue), 0.7) 100%) border-box;
+    color: rgb(219 234 254);
+    box-shadow: var(--accent-glow-subtle);
+  }
+
+  .accent-link {
+    color: rgb(191 219 254);
+    transition: color 180ms ease, text-shadow 200ms ease;
+  }
+
+  .accent-link:hover,
+  .accent-link:focus-visible {
+    color: rgb(240 249 255);
+    text-shadow:
+      0 0 18px rgba(var(--accent-blue), 0.45),
+      0 0 12px rgba(var(--accent-amber), 0.34);
+  }
+
+  .accent-text {
+    color: rgb(186 230 253);
+  }
+
+  .accent-selected {
+    box-shadow:
+      var(--accent-focus-ring),
+      var(--accent-glow-normal),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  }
+
+  .accent-control {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(180deg,
+        rgba(17, 19, 27, 0.9) 0%,
+        rgba(10, 12, 18, 0.94) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.68) 0%,
+        rgba(var(--accent-violet), 0.62) 46%,
+        rgba(var(--accent-blue), 0.68) 100%) border-box;
+    color: rgb(228 228 231);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 8px 20px -16px rgba(0, 0, 0, 0.95);
+    transition:
+      filter 180ms ease,
+      box-shadow 220ms ease,
+      background-position 240ms ease;
+    background-size: 100% 100%, 140% 140%;
+    background-position: 50% 50%, 50% 50%;
+  }
+
+  .accent-control:hover {
+    filter: brightness(1.07);
+    box-shadow:
+      var(--accent-glow-subtle),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    background-position: 50% 50%, 56% 46%;
+  }
+
+  .accent-control:focus-visible {
+    filter: brightness(1.08);
+    box-shadow:
+      var(--accent-focus-ring),
+      inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    background-position: 50% 50%, 58% 44%;
+  }
+
+  .accent-surface {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(180deg,
+        rgba(11, 13, 20, 0.55) 0%,
+        rgba(6, 8, 13, 0.72) 100%) padding-box,
+      linear-gradient(120deg,
+        rgba(var(--accent-amber), 0.6) 0%,
+        rgba(var(--accent-violet), 0.52) 52%,
+        rgba(var(--accent-blue), 0.62) 100%) border-box;
+    box-shadow: var(--accent-glow-subtle);
+  }
+
+  .accent-card-highlight {
+    border-color: rgba(165, 180, 252, 0.36);
+    background: linear-gradient(140deg,
+        rgba(var(--accent-amber), 0.1) 0%,
+        rgba(var(--accent-violet), 0.1) 40%,
+        rgba(var(--accent-blue), 0.1) 100%);
+    box-shadow: var(--accent-glow-subtle);
+  }
+
+  .ia-composer-surface {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border-radius: 1rem;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: linear-gradient(180deg,
+        rgba(39, 40, 47, 0.92) 0%,
+        rgba(22, 23, 29, 0.95) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      0 18px 30px -22px rgba(0, 0, 0, 0.95);
+    transition:
+      border-color 180ms ease,
+      box-shadow 220ms ease,
+      transform 140ms ease;
+  }
+
+  .ia-composer-surface::before {
+    content: "";
+    position: absolute;
+    inset: -48% -24% 26% -24%;
+    pointer-events: none;
+    background: var(--accent-gradient);
+    opacity: 0.14;
+    filter: blur(24px) saturate(118%);
+    -webkit-mask-image: radial-gradient(120% 85% at 50% 0%,
+        rgba(0, 0, 0, 1) 0%,
+        rgba(0, 0, 0, 0) 74%);
+    mask-image: radial-gradient(120% 85% at 50% 0%,
+        rgba(0, 0, 0, 1) 0%,
+        rgba(0, 0, 0, 0) 74%);
+    transition: opacity 220ms ease, transform 220ms ease;
+  }
+
+  .ia-composer-surface::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(180deg,
+        rgba(8, 10, 16, 0.06) 0%,
+        rgba(8, 10, 16, 0.2) 42%,
+        rgba(8, 10, 16, 0.46) 100%);
+  }
+
+  .ia-composer-surface>* {
+    position: relative;
+    z-index: 1;
+  }
+
+  .ia-composer-surface:hover::before {
+    opacity: 0.18;
+    transform: translateY(-2px);
+  }
+
+  .ia-composer-surface:focus-within::before {
+    opacity: 0.24;
+    transform: translateY(-3px);
+  }
+
+  .ia-composer-surface:focus-within {
+    border-color: rgba(255, 255, 255, 0.24);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 22px 34px -20px rgba(0, 0, 0, 1),
+      var(--accent-focus-ring);
+  }
+
+  .ia-control-surface {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: linear-gradient(180deg,
+        rgba(35, 37, 47, 0.92) 0%,
+        rgba(18, 20, 28, 0.95) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.09),
+      0 8px 16px -10px rgba(0, 0, 0, 0.9);
+    transition:
+      border-color 180ms ease,
+      box-shadow 220ms ease,
+      transform 140ms ease,
+      filter 180ms ease;
+  }
+
+  .ia-control-surface::before {
+    content: "";
+    position: absolute;
+    inset: -54% -30% 26% -30%;
+    pointer-events: none;
+    background: var(--accent-gradient);
+    opacity: 0.1;
+    filter: blur(14px) saturate(120%);
+    -webkit-mask-image: radial-gradient(120% 90% at 50% 0%,
+        rgba(0, 0, 0, 1) 0%,
+        rgba(0, 0, 0, 0) 76%);
+    mask-image: radial-gradient(120% 90% at 50% 0%,
+        rgba(0, 0, 0, 1) 0%,
+        rgba(0, 0, 0, 0) 76%);
+    transition: opacity 180ms ease, transform 180ms ease;
+  }
+
+  .ia-control-surface::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(180deg,
+        rgba(9, 11, 17, 0.04) 0%,
+        rgba(9, 11, 17, 0.18) 100%);
+  }
+
+  .ia-control-surface>* {
+    position: relative;
+    z-index: 1;
+  }
+
+  .ia-control-surface:hover::before,
+  .ia-control-surface:focus-visible::before {
+    opacity: 0.15;
+    transform: translateY(-1px);
+  }
+
+  .ia-control-surface:hover,
+  .ia-control-surface:focus-visible {
+    border-color: rgba(255, 255, 255, 0.22);
+    box-shadow:
+      var(--accent-glow-subtle),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    filter: brightness(1.04);
+  }
+
+  .ia-control-surface:active {
+    transform: translateY(1px) scale(0.99);
+  }
+
+  .ia-control-surface-strong::before {
+    opacity: 0.16;
+  }
+
+  .ia-control-surface-strong:hover::before,
+  .ia-control-surface-strong:focus-visible::before {
+    opacity: 0.21;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .accent-sheen::after {
+    animation: none !important;
+    transition: none !important;
+    opacity: 0 !important;
+  }
+
+  .accent-outline,
+  .accent-pill,
+  .accent-fill,
+  .accent-pill-active,
+  .rim-core,
+  .rim-primary,
+  .rim-secondary,
+  .rim-ghost,
+  .accent-control,
+  .ia-composer-surface,
+  .ia-control-surface {
+    transition: border-color 180ms ease, box-shadow 180ms ease;
+  }
+
+  .rim-core::before,
+  .accent-outline::before,
+  .accent-fill::before,
+  .accent-pill::before,
+  .accent-pill-active::before,
+  .accent-fill-subtle::before,
+  .ia-control-surface::before,
+  .ia-composer-surface::before {
+    transition: none;
   }
 }

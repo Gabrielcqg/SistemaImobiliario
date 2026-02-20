@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Sora, Space_Mono } from "next/font/google";
 import RouteProgressBar from "@/components/layout/RouteProgressBar";
+import QueryProvider from "@/components/providers/QueryProvider";
 import "./globals.css";
 
 const sora = Sora({
@@ -42,8 +43,10 @@ export default function RootLayout({
   return (
     <html lang="pt-BR" className={`${sora.variable} ${spaceMono.variable}`}>
       <body className="min-h-screen bg-black text-white">
-        <RouteProgressBar />
-        {children}
+        <QueryProvider>
+          <RouteProgressBar />
+          {children}
+        </QueryProvider>
       </body>
     </html>
   );

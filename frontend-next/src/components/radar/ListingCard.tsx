@@ -32,9 +32,10 @@ const formatDate = (value: string | null) => {
 
 type ListingCardProps = {
   listing: Listing;
+  className?: string;
 };
 
-export default function ListingCard({ listing }: ListingCardProps) {
+export default function ListingCard({ listing, className = "" }: ListingCardProps) {
   const shouldReduceMotion = useReducedMotion();
   const x = useMotionValue(0);
   const y = useMotionValue(0);
@@ -56,7 +57,12 @@ export default function ListingCard({ listing }: ListingCardProps) {
     y.set(0);
   };
 
-  const portalLabel = listing.portal ? listing.portal.toUpperCase() : "PORTAL";
+  const portalLabel = useMemo(() => {
+    const rawPortal = (listing.portal ?? "").trim().toLowerCase();
+    if (!rawPortal) return "PORTAL";
+    if (rawPortal === "quintoandar") return "5andar";
+    return rawPortal.toUpperCase();
+  }, [listing.portal]);
   const isNew24h = useMemo(() => {
     if (!listing.first_seen_at) return false;
     const ts = new Date(listing.first_seen_at).getTime();
@@ -109,13 +115,12 @@ export default function ListingCard({ listing }: ListingCardProps) {
           <span
             aria-hidden="true"
             className="
-              pointer-events-none absolute -right-2 -top-2 z-20
+              pointer-events-none absolute -right-2 -top-2 z-30
               flex h-6 min-w-6 items-center justify-center rounded-full px-2
-              border border-emerald-300/40 bg-emerald-500/90
-              text-[9px] font-semibold uppercase tracking-[0.08em] text-emerald-50
-              shadow-[0_0_12px_rgba(16,185,129,0.28)]
+              accent-badge
+              text-[9px] font-semibold uppercase tracking-[0.08em]
               backdrop-blur
-              sm:h-7 sm:min-w-7 sm:text-[10px]
+              sm:-right-2.5 sm:-top-2.5 sm:h-7 sm:min-w-7 sm:text-[10px]
             "
           >
             Novo
@@ -130,17 +135,19 @@ export default function ListingCard({ listing }: ListingCardProps) {
             ? undefined
             : { rotateX, rotateY, transformStyle: "preserve-3d" }
         }
-        className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-white/5 p-5 shadow-glow backdrop-blur-md transition-colors duration-150 focus-within:border-white/40"
+        className={`relative overflow-hidden rounded-2xl border border-zinc-800 bg-white/5 p-5 shadow-glow backdrop-blur-md transition-colors duration-150 focus-within:border-white/40 ${className}`.trim()}
         whileHover={shouldReduceMotion ? undefined : { scale: 1.01 }}
         transition={{ duration: 0.15, ease: "easeOut" }}
       >
-      <div className="flex items-center justify-between text-xs text-zinc-500">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-zinc-300">
-            {portalLabel}
+      <div className="flex items-center justify-between gap-2 text-xs text-zinc-500">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="inline-flex min-w-0 max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-semibold tracking-[0.3em] text-zinc-300">
+            <span className="truncate">{portalLabel}</span>
           </span>
         </div>
-        <span className="shrink-0">{formatDate(listing.first_seen_at)}</span>
+        <span className="shrink-0 whitespace-nowrap">
+          {formatDate(listing.first_seen_at)}
+        </span>
       </div>
 
       {listing.url ? (

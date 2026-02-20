@@ -279,11 +279,11 @@ export default function SignupIndividualPage() {
           </p>
         }
       >
-        <div className="space-y-3 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-4">
+        <div className="space-y-3 rounded-xl accent-card-highlight p-4">
           <h2
             ref={sentTitleRef}
             tabIndex={-1}
-            className="text-base font-semibold text-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+            className="text-base font-semibold text-sky-100 accent-focus focus:outline-none"
           >
             Confirme seu e-mail para ativar sua conta
           </h2>
@@ -327,7 +327,7 @@ export default function SignupIndividualPage() {
           <p
             role="status"
             aria-live="polite"
-            className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+            className="rounded-lg accent-alert px-3 py-2 text-sm"
           >
             {resendStatus}
           </p>
@@ -447,7 +447,7 @@ export default function SignupIndividualPage() {
           <p
             role="status"
             aria-live="polite"
-            className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+            className="rounded-lg accent-alert px-3 py-2 text-sm"
           >
             {success}
           </p>

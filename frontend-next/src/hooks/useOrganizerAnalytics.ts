@@ -5,8 +5,9 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type PipelineStatus =
   | "novo_match"
+  | "contato_feito"
   | "em_conversa"
-  | "aguardando_resposta"
+  | "aguardando_retorno"
   | "visita_agendada"
   | "proposta"
   | "fechado";
@@ -123,6 +124,10 @@ type OrganizerAnalyticsData = {
   rangeLabel: string;
   totalClientsInOrg: number;
   totalTimelineEventsInOrg: number;
+  organizationClosureCounts: {
+    won: number;
+    lost: number;
+  };
   hasAnyCrmData: boolean;
   hasPeriodData: boolean;
   activeMembersInPeriod: number;
@@ -200,12 +205,17 @@ type UseOrganizerAnalyticsResult = {
 
 type ClientRow = {
   id: string;
+  owner_user_id?: string | null;
   user_id: string | null;
   name: string | null;
   contact_info: { email?: string; phone?: string } | null;
   status_pipeline: PipelineStatus | string | null;
   closed_outcome: ClosedOutcome | string | null;
+  next_action_at: string | null;
   next_followup_at: string | null;
+  chase_due_at: string | null;
+  last_contact_at: string | null;
+  last_reply_at: string | null;
   visit_at: string | null;
   proposal_value: number | null;
   last_status_change_at: string | null;
@@ -223,7 +233,9 @@ type TimelineRow = {
   payload:
     | {
         next_action?: string | null;
+        next_action_at?: string | null;
         next_followup_at?: string | null;
+        chase_due_at?: string | null;
         visit_at?: string | null;
         proposal_value?: number | null;
         closed_outcome?: ClosedOutcome | string | null;
@@ -278,8 +290,9 @@ type SupabaseLikeError = {
 
 const PIPELINE_ORDER: PipelineStatus[] = [
   "novo_match",
+  "contato_feito",
   "em_conversa",
-  "aguardando_resposta",
+  "aguardando_retorno",
   "visita_agendada",
   "proposta",
   "fechado"
@@ -287,8 +300,9 @@ const PIPELINE_ORDER: PipelineStatus[] = [
 
 const PIPELINE_LABEL: Record<PipelineStatus, string> = {
   novo_match: "Novo Match",
+  contato_feito: "Contato feito",
   em_conversa: "Em conversa",
-  aguardando_resposta: "Aguardando resposta",
+  aguardando_retorno: "Aguardando retorno",
   visita_agendada: "Visita agendada",
   proposta: "Proposta",
   fechado: "Fechado"
@@ -351,6 +365,10 @@ const emptyData: OrganizerAnalyticsData = {
   rangeLabel: "Sem período",
   totalClientsInOrg: 0,
   totalTimelineEventsInOrg: 0,
+  organizationClosureCounts: {
+    won: 0,
+    lost: 0
+  },
   hasAnyCrmData: false,
   hasPeriodData: false,
   activeMembersInPeriod: 0,
@@ -406,8 +424,10 @@ const emptyData: OrganizerAnalyticsData = {
 
 const normalizePipelineStatus = (value?: string | null): PipelineStatus => {
   if (value === "novo_match") return "novo_match";
+  if (value === "contato_feito") return "contato_feito";
   if (value === "em_conversa") return "em_conversa";
-  if (value === "aguardando_resposta") return "aguardando_resposta";
+  if (value === "aguardando_retorno") return "aguardando_retorno";
+  if (value === "aguardando_resposta") return "aguardando_retorno";
   if (value === "visita_agendada") return "visita_agendada";
   if (value === "proposta") return "proposta";
   if (value === "fechado") return "fechado";
@@ -425,6 +445,16 @@ const parseDateSafe = (value?: string | null) => {
   if (Number.isNaN(parsed.getTime())) return null;
   return parsed;
 };
+
+const resolveClientFollowupAt = (client: ClientRow) =>
+  parseDateSafe(client.next_action_at) ?? parseDateSafe(client.next_followup_at);
+
+const resolveTimelineFollowupAt = (
+  payload?: {
+    next_action_at?: string | null;
+    next_followup_at?: string | null;
+  } | null
+) => parseDateSafe(payload?.next_action_at ?? payload?.next_followup_at ?? null);
 
 const resolveClientMovementAt = (client: ClientRow) =>
   parseDateSafe(client.updated_at) ??
@@ -544,7 +574,9 @@ function normalizePayload(payload: TimelineRow["payload"]) {
     try {
       return JSON.parse(payload) as {
         next_action?: string | null;
+        next_action_at?: string | null;
         next_followup_at?: string | null;
+        chase_due_at?: string | null;
         visit_at?: string | null;
         proposal_value?: number | null;
         closed_outcome?: ClosedOutcome | string | null;
@@ -568,6 +600,15 @@ function toMemberNameFallback(email: string | null, userId: string) {
     }
   }
   return toMemberLabel(userId);
+}
+
+function resolveClientOwnerId(
+  client?: Pick<ClientRow, "owner_user_id" | "user_id"> | null
+) {
+  const owner = client?.owner_user_id ?? client?.user_id ?? null;
+  if (typeof owner !== "string") return null;
+  const normalized = owner.trim();
+  return normalized.length > 0 ? normalized : null;
 }
 
 function buildStatusTag(row: MemberPerformance): MemberPerformance["status"] {
@@ -713,9 +754,9 @@ export function useOrganizerAnalytics(
       }
 
       const clientsBaseFields =
-        "id, user_id, name, contact_info, status_pipeline, closed_outcome, next_followup_at, visit_at, proposal_value, last_status_change_at, updated_at, created_at";
+        "id, owner_user_id, user_id, name, contact_info, status_pipeline, closed_outcome, next_action_at, next_followup_at, chase_due_at, last_contact_at, last_reply_at, visit_at, proposal_value, last_status_change_at, updated_at, created_at";
       const clientsNoUpdatedFields =
-        "id, user_id, name, contact_info, status_pipeline, closed_outcome, next_followup_at, visit_at, proposal_value, last_status_change_at, created_at";
+        "id, owner_user_id, user_id, name, contact_info, status_pipeline, closed_outcome, next_action_at, next_followup_at, chase_due_at, last_contact_at, last_reply_at, visit_at, proposal_value, last_status_change_at, created_at";
       const clientsFallbackFields =
         "id, user_id, name, contact_info, status_pipeline, created_at";
       const timelineFields =
@@ -965,17 +1006,18 @@ export function useOrganizerAnalytics(
         memberOptions.map((member) => [member.id, member])
       );
       clientsRows.forEach((row) => {
-        if (!row.user_id || memberMap.has(row.user_id)) return;
-        const directory = memberDirectoryById.get(row.user_id);
+        const ownerId = resolveClientOwnerId(row);
+        if (!ownerId || memberMap.has(ownerId)) return;
+        const directory = memberDirectoryById.get(ownerId);
         const roleFromMembership = membershipRows.find(
-          (member) => member.user_id === row.user_id
+          (member) => member.user_id === ownerId
         )?.role;
         const memberEmail = directory?.email ?? row.contact_info?.email?.trim() ?? null;
         const memberName =
           directory?.name ??
-          (row.name?.trim().length ? row.name.trim() : toMemberNameFallback(memberEmail, row.user_id));
-        memberMap.set(row.user_id, {
-          id: row.user_id,
+          (row.name?.trim().length ? row.name.trim() : toMemberNameFallback(memberEmail, ownerId));
+        memberMap.set(ownerId, {
+          id: ownerId,
           label: memberName,
           email: memberEmail,
           role: normalizeRole(directory?.role ?? roleFromMembership ?? null)
@@ -1013,6 +1055,21 @@ export function useOrganizerAnalytics(
         });
       }
 
+      const organizationClosureCounts = clientsRows.reduce(
+        (acc, client) => {
+          if (normalizePipelineStatus(client.status_pipeline) !== "fechado") {
+            return acc;
+          }
+          if (client.closed_outcome === "won") {
+            acc.won += 1;
+          } else if (client.closed_outcome === "lost") {
+            acc.lost += 1;
+          }
+          return acc;
+        },
+        { won: 0, lost: 0 }
+      );
+
       const selectedMemberId =
         filters.memberId !== "all" && memberOptions.some((m) => m.id === filters.memberId)
           ? filters.memberId
@@ -1021,7 +1078,9 @@ export function useOrganizerAnalytics(
       const filteredClients =
         selectedMemberId === "all"
           ? clientsRows
-          : clientsRows.filter((client) => client.user_id === selectedMemberId);
+          : clientsRows.filter(
+              (client) => resolveClientOwnerId(client) === selectedMemberId
+            );
 
       const contactEventsByClient = new Map<string, Date[]>();
       const normalizedTimeline = timelineRows.map((event) => {
@@ -1031,8 +1090,9 @@ export function useOrganizerAnalytics(
         const nextAction = toLowerSafe(payload?.next_action);
         const hasContactAction =
           CONTACT_ACTIONS.has(nextAction) ||
+          toStatus === "contato_feito" ||
           toStatus === "em_conversa" ||
-          toStatus === "aguardando_resposta";
+          toStatus === "aguardando_retorno";
 
         if (hasContactAction && createdAt) {
           const existing = contactEventsByClient.get(event.client_id) ?? [];
@@ -1041,7 +1101,9 @@ export function useOrganizerAnalytics(
         }
 
         const ownerUserId =
-          clientsById.get(event.client_id)?.user_id ?? event.actor_user_id ?? null;
+          resolveClientOwnerId(clientsById.get(event.client_id)) ??
+          event.actor_user_id ??
+          null;
 
         return {
           ...event,
@@ -1061,7 +1123,9 @@ export function useOrganizerAnalytics(
             toStatus === "fechado" &&
             ((payload?.closed_outcome as string | null | undefined) === "lost" ||
               clientsById.get(event.client_id)?.closed_outcome === "lost"),
-          hasTaskCreated: Boolean(payload?.next_followup_at)
+          hasTaskCreated: Boolean(
+            resolveTimelineFollowupAt(payload) ?? parseDateSafe(payload?.chase_due_at ?? null)
+          )
         };
       });
 
@@ -1137,7 +1201,7 @@ export function useOrganizerAnalytics(
           isWithin(parseDateSafe(client.created_at), periodStart, periodEnd)
         );
         createdClientsInRange.forEach((client) => {
-          const owner = client.user_id;
+          const owner = resolveClientOwnerId(client);
           if (!owner) return;
           const aggregate = ensureAggregate(owner);
           aggregate.newItems += 1;
@@ -1148,7 +1212,7 @@ export function useOrganizerAnalytics(
           isWithin(resolveClientMovementAt(client), periodStart, periodEnd)
         );
         movedClientsInRange.forEach((client) => {
-          const owner = client.user_id;
+          const owner = resolveClientOwnerId(client);
           if (!owner) return;
           const aggregate = ensureAggregate(owner);
           aggregate.advancedItems += 1;
@@ -1187,7 +1251,7 @@ export function useOrganizerAnalytics(
 
         // Fallback para bases legadas sem timeline consistente.
         clientsSource.forEach((client) => {
-          const owner = client.user_id;
+          const owner = resolveClientOwnerId(client);
           if (!owner || clientsWithTimelineEvents.has(client.id)) return;
 
           const aggregate = ensureAggregate(owner);
@@ -1256,7 +1320,8 @@ export function useOrganizerAnalytics(
         activeClientsInRange.set(client.id, client);
       });
       activeClientsInRange.forEach((client) => {
-        if (client.user_id) activeMemberIds.add(client.user_id);
+        const ownerId = resolveClientOwnerId(client);
+        if (ownerId) activeMemberIds.add(ownerId);
       });
       currentEvents.forEach((event) => {
         if (event.ownerUserId) activeMemberIds.add(event.ownerUserId);
@@ -1282,8 +1347,9 @@ export function useOrganizerAnalytics(
         },
         {
           novo_match: 0,
+          contato_feito: 0,
           em_conversa: 0,
-          aguardando_resposta: 0,
+          aguardando_retorno: 0,
           visita_agendada: 0,
           proposta: 0,
           fechado: 0
@@ -1343,7 +1409,7 @@ export function useOrganizerAnalytics(
         )
         .map((member) => {
           const ownedClients = filteredClients.filter(
-            (client) => client.user_id === member.id
+            (client) => resolveClientOwnerId(client) === member.id
           );
           const responseSamples = ownedClients
             .map((client) => firstResponseHoursByClient.get(client.id))
@@ -1358,7 +1424,8 @@ export function useOrganizerAnalytics(
           const overdueTasks = ownedClients.filter((client) => {
             const status = normalizePipelineStatus(client.status_pipeline);
             if (status === "fechado") return false;
-            const followupAt = parseDateSafe(client.next_followup_at);
+            const followupAt =
+              resolveClientFollowupAt(client) ?? parseDateSafe(client.chase_due_at);
             if (!followupAt) return false;
             return followupAt < nowRef;
           }).length;
@@ -1520,10 +1587,12 @@ export function useOrganizerAnalytics(
         .sort((a, b) => a.avgHours - b.avgHours);
 
       const clientsWithFollowup = filteredClients.filter(
-        (client) => parseDateSafe(client.next_followup_at) !== null
+        (client) =>
+          resolveClientFollowupAt(client) !== null || parseDateSafe(client.chase_due_at) !== null
       );
       const dueTodayCount = clientsWithFollowup.filter((client) => {
-        const followupAt = parseDateSafe(client.next_followup_at);
+        const followupAt =
+          resolveClientFollowupAt(client) ?? parseDateSafe(client.chase_due_at);
         if (!followupAt) return false;
         return (
           followupAt >= startOfDay(nowRef) &&
@@ -1532,7 +1601,8 @@ export function useOrganizerAnalytics(
         );
       }).length;
       const overdueCount = clientsWithFollowup.filter((client) => {
-        const followupAt = parseDateSafe(client.next_followup_at);
+        const followupAt =
+          resolveClientFollowupAt(client) ?? parseDateSafe(client.chase_due_at);
         if (!followupAt) return false;
         return (
           followupAt < nowRef &&
@@ -1540,7 +1610,8 @@ export function useOrganizerAnalytics(
         );
       }).length;
       const next7DaysCount = clientsWithFollowup.filter((client) => {
-        const followupAt = parseDateSafe(client.next_followup_at);
+        const followupAt =
+          resolveClientFollowupAt(client) ?? parseDateSafe(client.chase_due_at);
         if (!followupAt) return false;
         return (
           followupAt > endOfDay(nowRef) &&
@@ -1569,7 +1640,7 @@ export function useOrganizerAnalytics(
       }).length;
 
       const unassignedCount = filteredClients.filter(
-        (client) => !client.user_id || client.user_id.trim().length === 0
+        (client) => !resolveClientOwnerId(client)
       ).length;
       const stalledProposalCount = filteredClients.filter((client) => {
         const status = normalizePipelineStatus(client.status_pipeline);
@@ -1583,7 +1654,10 @@ export function useOrganizerAnalytics(
       const visitNoFollowupCount = filteredClients.filter((client) => {
         const status = normalizePipelineStatus(client.status_pipeline);
         if (status !== "visita_agendada") return false;
-        return parseDateSafe(client.next_followup_at) === null;
+        return (
+          resolveClientFollowupAt(client) === null &&
+          parseDateSafe(client.chase_due_at) === null
+        );
       }).length;
 
       const duplicateMap = new Map<string, number>();
@@ -1758,6 +1832,7 @@ export function useOrganizerAnalytics(
         rangeLabel: range.label,
         totalClientsInOrg: filteredClients.length,
         totalTimelineEventsInOrg: filteredTimeline.length,
+        organizationClosureCounts,
         hasAnyCrmData: filteredClients.length > 0 || filteredTimeline.length > 0,
         hasPeriodData:
           currentCreatedClients.length > 0 ||

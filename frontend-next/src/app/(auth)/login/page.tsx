@@ -222,7 +222,7 @@ export default function LoginPage() {
           tabIndex={-1}
           role="status"
           aria-live="polite"
-          className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+          className="rounded-lg accent-alert accent-focus px-3 py-2 text-sm text-sky-100 focus:outline-none"
         >
           E-mail confirmado! Agora voce ja pode fazer login.
         </p>
@@ -376,7 +376,7 @@ export default function LoginPage() {
           <p
             role="status"
             aria-live="polite"
-            className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+            className="rounded-lg accent-alert px-3 py-2 text-sm"
           >
             {success}
           </p>

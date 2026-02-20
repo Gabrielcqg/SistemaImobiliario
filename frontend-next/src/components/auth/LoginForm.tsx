@@ -203,7 +203,7 @@ export default function LoginForm({ onSwitchMode }: LoginFormProps) {
         <p
           role="status"
           aria-live="polite"
-          className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+          className="rounded-lg accent-alert px-3 py-2 text-sm"
         >
           {success}
         </p>
@@ -225,7 +225,7 @@ export default function LoginForm({ onSwitchMode }: LoginFormProps) {
 
       <button
         type="button"
-        className="w-full rounded-lg px-3 py-2 text-sm text-zinc-300 transition hover:bg-white/5 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+        className="rim-core rim-secondary w-full rounded-lg px-3 py-2 text-sm text-zinc-300 transition hover:text-white focus:outline-none"
         onClick={onSwitchMode}
         disabled={loading}
         aria-disabled={loading}

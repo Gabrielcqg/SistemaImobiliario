@@ -55,15 +55,15 @@ const formatDelta = (value: number | null) => {
 
 const getDeltaTone = (value: number | null) => {
   if (value === null) return "text-zinc-400";
-  if (value > 0) return "text-emerald-300";
+  if (value > 0) return "accent-text";
   if (value < 0) return "text-red-300";
   return "text-zinc-300";
 };
 
 const getStatusTone = (value: "verde" | "amarelo" | "vermelho") => {
-  if (value === "verde") return "bg-emerald-500/20 text-emerald-200 border-emerald-500/40";
-  if (value === "amarelo") return "bg-amber-500/20 text-amber-200 border-amber-500/40";
-  return "bg-red-500/20 text-red-200 border-red-500/40";
+  if (value === "verde") return "accent-badge";
+  if (value === "amarelo") return "accent-badge text-amber-100";
+  return "accent-badge text-red-200";
 };
 
 const formatPeriodDate = (isoDate: string) => {
@@ -97,7 +97,7 @@ function SummaryMiniCard({
   isEmpty
 }: SummaryMiniCardProps) {
   return (
-    <div className="min-h-[96px] rounded-xl border border-zinc-800 bg-black/40 px-4 py-3">
+    <div className="min-h-[96px] rounded-xl accent-surface px-4 py-3">
       <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">{title}</p>
       {loading ? (
         <div className="mt-2 space-y-2">
@@ -181,7 +181,7 @@ export default function AnalyticsPage() {
     !needsOrganizationChoice
   ) {
     return (
-      <Card className="border-red-500/40 bg-red-500/10 text-sm text-red-100">
+      <Card className="panel border-red-500/40 bg-red-500/10 text-sm text-red-100">
         Não foi possível identificar uma organização ativa para carregar o painel.
       </Card>
     );
@@ -203,19 +203,19 @@ export default function AnalyticsPage() {
 
   return (
     <div className="min-w-0 space-y-6">
-      <Card className="space-y-4">
+      <Card className="panel space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
               Painel do Organizador
             </p>
-            <h2 className="mt-2 text-2xl font-semibold text-white">Analytics de execução do time</h2>
+            <h2 className="mt-2 text-2xl section-title">Analytics de execução do time</h2>
             <p className="mt-1 text-sm text-zinc-400">
               Foco em resultados por membro, gargalos do funil e alertas operacionais.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
-            <span className="rounded-full border border-zinc-700 px-3 py-1">
+            <span className="accent-badge rounded-full px-3 py-1">
               Período: {appliedPeriodLabel}
             </span>
             <Button variant="ghost" className="h-8 px-3 text-xs" onClick={refresh}>
@@ -247,11 +247,10 @@ export default function AnalyticsPage() {
                         period: option.value
                       });
                     }}
-                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-                      active
-                        ? "border-white bg-white text-black"
-                        : "border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white"
-                    }`}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition border border-transparent focus-visible:outline-none ${active
+                      ? "is-active-fixed"
+                      : "bg-surface text-zinc-400 hover:text-white hover:border-zinc-700 hover:bg-surface-lifted"
+                      }`}
                   >
                     {option.label}
                   </button>
@@ -275,7 +274,7 @@ export default function AnalyticsPage() {
                 }
                 setFilters({ memberId: event.target.value });
               }}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-100"
+              className="w-full rounded-lg px-3 py-2 text-sm text-zinc-100 accent-focus accent-control"
             >
               <option value="all">Todos os membros</option>
               {members.map((member) => (
@@ -286,7 +285,7 @@ export default function AnalyticsPage() {
             </select>
           </div>
 
-          <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-1">
+          <div className="grid gap-2 sm:grid-cols-2">
             <SummaryMiniCard
               title="Membros ativos no período"
               value={summaryCards.activeMembersCount}
@@ -300,6 +299,20 @@ export default function AnalyticsPage() {
               loading={summaryCards.loading}
               error={summaryCards.error}
               isEmpty={summaryCards.isEmpty}
+            />
+            <SummaryMiniCard
+              title="Ganhos (organização)"
+              value={data.organizationClosureCounts.won}
+              loading={loading}
+              error={metricsError}
+              isEmpty={!data.hasAnyCrmData}
+            />
+            <SummaryMiniCard
+              title="Perdas (organização)"
+              value={data.organizationClosureCounts.lost}
+              loading={loading}
+              error={metricsError}
+              isEmpty={!data.hasAnyCrmData}
             />
           </div>
         </div>
@@ -321,26 +334,26 @@ export default function AnalyticsPage() {
       </Card>
 
       {membersError ? (
-        <Card className="border-amber-500/40 bg-amber-500/10 text-sm text-amber-100">
+        <Card className="panel border-amber-500/40 bg-amber-500/10 text-sm text-amber-100">
           {membersError}
         </Card>
       ) : null}
 
       {metricsError ? (
-        <Card className="border-red-500/40 bg-red-500/10 text-sm text-red-100">
+        <Card className="panel border-red-500/40 bg-red-500/10 text-sm text-red-100">
           {metricsError}
         </Card>
       ) : null}
 
       {hasNoCrmData ? (
-        <Card className="border-zinc-700 bg-zinc-900/40 text-sm text-zinc-200">
+        <Card className="panel accent-surface text-sm text-zinc-200">
           Esta organização ainda não tem atividade de CRM suficiente para o painel. Assim que
           clientes/etapas forem registrados, os indicadores aparecerão aqui.
         </Card>
       ) : null}
 
       {hasNoDataForPeriod ? (
-        <Card className="border-zinc-700 bg-zinc-900/40 text-sm text-zinc-200">
+        <Card className="panel accent-surface text-sm text-zinc-200">
           Sem dados para o período selecionado. Tente ampliar para <strong>30d</strong> ou{" "}
           <strong>Mês atual</strong>.
         </Card>
@@ -354,44 +367,44 @@ export default function AnalyticsPage() {
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {loading
             ? Array.from({ length: 7 }).map((_, index) => (
-                <div
-                  key={`loading-kpi-${index}`}
-                  className="h-40 animate-pulse rounded-2xl border border-zinc-800 bg-white/5"
-                />
-              ))
+              <div
+                key={`loading-kpi-${index}`}
+                className="h-40 animate-pulse rounded-2xl border border-zinc-800 bg-white/5"
+              />
+            ))
             : data.kpis.map((kpi) => (
-                <Card key={kpi.key} className="space-y-2 p-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">{kpi.label}</p>
-                  <p className="text-2xl font-semibold text-white">{formatNumber(kpi.value)}</p>
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className={getDeltaTone(kpi.changePct)}>
-                      {kpi.changePct !== null && kpi.changePct >= 0 ? (
-                        <ArrowUpRight className="mr-1 inline h-3 w-3" />
-                      ) : (
-                        <ArrowDownRight className="mr-1 inline h-3 w-3" />
-                      )}
-                      {formatDelta(kpi.changePct)} vs anterior
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const topMember = members.find(
-                        (member) => member.label === kpi.topMemberLabel
-                      );
-                      if (topMember) setFilters({ memberId: topMember.id });
-                    }}
-                    className="text-xs text-zinc-400 underline underline-offset-4 hover:text-white"
-                  >
-                    Top membro: {kpi.topMemberLabel} ({formatNumber(kpi.topMemberValue)})
-                  </button>
-                </Card>
-              ))}
+              <Card key={kpi.key} className="space-y-2 p-4">
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">{kpi.label}</p>
+                <p className="text-2xl font-semibold text-white">{formatNumber(kpi.value)}</p>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className={getDeltaTone(kpi.changePct)}>
+                    {kpi.changePct !== null && kpi.changePct >= 0 ? (
+                      <ArrowUpRight className="mr-1 inline h-3 w-3" />
+                    ) : (
+                      <ArrowDownRight className="mr-1 inline h-3 w-3" />
+                    )}
+                    {formatDelta(kpi.changePct)} vs anterior
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const topMember = members.find(
+                      (member) => member.label === kpi.topMemberLabel
+                    );
+                    if (topMember) setFilters({ memberId: topMember.id });
+                  }}
+                  className="text-xs text-zinc-400 underline underline-offset-4 hover:text-white"
+                >
+                  Top membro: {kpi.topMemberLabel} ({formatNumber(kpi.topMemberValue)})
+                </button>
+              </Card>
+            ))}
         </div>
       </section>
 
       <section className="grid gap-6 2xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
-        <Card className="min-w-0 space-y-4 p-4">
+        <Card className="panel min-w-0 space-y-4 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-zinc-200">
               <Users className="h-4 w-4" />
@@ -410,7 +423,7 @@ export default function AnalyticsPage() {
                       | "contacts"
                   })
                 }
-                className="rounded-lg border border-zinc-700 bg-zinc-950/60 px-2 py-1.5 text-zinc-200"
+                className="rounded-lg px-2 py-1.5 text-zinc-200 accent-focus accent-control"
               >
                 {SORT_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -425,7 +438,7 @@ export default function AnalyticsPage() {
                     sortDirection: filters.sortDirection === "asc" ? "desc" : "asc"
                   })
                 }
-                className="rounded-lg border border-zinc-700 px-2 py-1.5 text-zinc-300 transition hover:text-white"
+                className="rounded-lg px-2 py-1.5 text-zinc-300 transition hover:text-white accent-outline accent-sheen accent-focus focus-visible:outline-none"
               >
                 {filters.sortDirection === "asc" ? "↑ Asc" : "↓ Desc"}
               </button>
@@ -458,7 +471,7 @@ export default function AnalyticsPage() {
                       <button
                         type="button"
                         onClick={() => setFilters({ memberId: row.memberId })}
-                        className="text-left"
+                        className="accent-outline accent-sheen accent-focus rounded-lg px-2 py-1 text-left text-zinc-100 focus-visible:outline-none"
                       >
                         <span className="block font-medium text-white underline underline-offset-4">
                           {row.memberLabel}
@@ -499,7 +512,7 @@ export default function AnalyticsPage() {
           </div>
         </Card>
 
-        <Card className="min-w-0 space-y-4 p-4">
+        <Card className="panel min-w-0 space-y-4 p-4">
           <div className="flex items-center gap-2 text-zinc-200">
             <Funnel className="h-4 w-4" />
             <h3 className="text-lg font-semibold">Funil CRM</h3>
@@ -509,7 +522,7 @@ export default function AnalyticsPage() {
               const maxCount = Math.max(1, ...data.funnel.steps.map((item) => item.count));
               const widthPct = (step.count / maxCount) * 100;
               return (
-                <div key={step.status} className="space-y-1 rounded-lg border border-zinc-800/70 bg-black/30 p-2.5">
+                <div key={step.status} className="space-y-1 rounded-lg accent-surface p-2.5">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-zinc-300">{step.label}</span>
                     <span className="text-zinc-400">
@@ -533,21 +546,21 @@ export default function AnalyticsPage() {
               );
             })}
           </div>
-          <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2 text-xs text-zinc-400">
+          <div className="rounded-xl accent-surface px-3 py-2 text-xs text-zinc-400">
             Gargalo atual: {data.funnel.bottleneckLabel ?? "Sem gargalo crítico no recorte."}
           </div>
         </Card>
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
-        <Card className="space-y-4 p-4">
+        <Card className="panel space-y-4 p-4">
           <h3 className="text-lg font-semibold text-white">Tempo de Resposta</h3>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+            <div className="rounded-xl accent-surface p-3">
               <p className="text-xs text-zinc-500">Média geral 1º contato</p>
               <p className="mt-2 text-xl font-semibold">{formatHours(data.response.avgHours)}</p>
             </div>
-            <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+            <div className="rounded-xl accent-surface p-3">
               <p className="text-xs text-zinc-500">% dentro da meta</p>
               <p className="mt-2 text-xl font-semibold">{formatPct(data.response.withinGoalPct)}</p>
             </div>
@@ -559,7 +572,7 @@ export default function AnalyticsPage() {
                 {data.response.fastest.map((item) => (
                   <li key={`fast-${item.memberId}`} className="flex justify-between">
                     <span>{item.memberLabel}</span>
-                    <span className="text-emerald-300">{formatHours(item.avgHours)}</span>
+                    <span className="accent-text">{formatHours(item.avgHours)}</span>
                   </li>
                 ))}
               </ul>
@@ -595,23 +608,23 @@ export default function AnalyticsPage() {
           </div>
         </Card>
 
-        <Card className="space-y-4 p-4">
+        <Card className="panel space-y-4 p-4">
           <h3 className="text-lg font-semibold text-white">Atividades & Tarefas</h3>
           <div className="grid gap-3 sm:grid-cols-3">
-            <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+            <div className="rounded-xl accent-surface p-3">
               <p className="text-xs text-zinc-500">Atrasadas</p>
               <p className="mt-1 text-xl font-semibold">{formatNumber(data.tasks.overdue)}</p>
             </div>
-            <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+            <div className="rounded-xl accent-surface p-3">
               <p className="text-xs text-zinc-500">Hoje</p>
               <p className="mt-1 text-xl font-semibold">{formatNumber(data.tasks.dueToday)}</p>
             </div>
-            <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+            <div className="rounded-xl accent-surface p-3">
               <p className="text-xs text-zinc-500">Próx. 7 dias</p>
               <p className="mt-1 text-xl font-semibold">{formatNumber(data.tasks.next7Days)}</p>
             </div>
           </div>
-          <div className="rounded-xl border border-zinc-800 bg-black/40 p-3 text-sm text-zinc-300">
+          <div className="rounded-xl accent-surface p-3 text-sm text-zinc-300">
             Criadas vs concluídas no período: {formatNumber(data.tasks.created)} /{" "}
             {formatNumber(data.tasks.completed)}{" "}
             <span
@@ -619,7 +632,7 @@ export default function AnalyticsPage() {
                 data.tasks.backlogDelta > 0
                   ? "text-red-300"
                   : data.tasks.backlogDelta < 0
-                    ? "text-emerald-300"
+                    ? "accent-text"
                     : "text-zinc-300"
               }
             >
@@ -642,7 +655,7 @@ export default function AnalyticsPage() {
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
-        <Card className="space-y-4 p-4">
+        <Card className="panel space-y-4 p-4">
           <h3 className="text-lg font-semibold text-white">Alertas operacionais</h3>
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-red-300">Risco alto</p>
@@ -668,7 +681,7 @@ export default function AnalyticsPage() {
                 <Link
                   key={alert.key}
                   href={alert.href}
-                  className="flex items-center justify-between rounded-lg border border-zinc-700 bg-black/40 px-3 py-2 text-sm text-zinc-200 hover:border-zinc-500"
+                  className="flex items-center justify-between rounded-lg accent-surface px-3 py-2 text-sm text-zinc-200"
                 >
                   <span>{alert.label}</span>
                   <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs">
@@ -680,7 +693,7 @@ export default function AnalyticsPage() {
           </div>
         </Card>
 
-        <Card className="space-y-4 p-4">
+        <Card className="panel space-y-4 p-4">
           <div className="flex items-center gap-2">
             <Target className="h-4 w-4 text-zinc-300" />
             <h3 className="text-lg font-semibold text-white">Metas mensais</h3>
@@ -692,7 +705,7 @@ export default function AnalyticsPage() {
           </p>
           <div className="space-y-2">
             {data.goals.metrics.map((metric) => (
-              <div key={metric.key} className="rounded-lg border border-zinc-800 bg-black/40 p-3">
+              <div key={metric.key} className="rounded-lg accent-surface p-3">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-zinc-200">{metric.label}</span>
                   <span className="text-zinc-400">
@@ -701,13 +714,12 @@ export default function AnalyticsPage() {
                 </div>
                 <div className="mt-2 h-2 rounded-full bg-zinc-800">
                   <div
-                    className={`h-full rounded-full ${
-                      metric.status === "atingida"
-                        ? "bg-emerald-400"
-                        : metric.status === "em_risco"
-                          ? "bg-amber-400"
-                          : "bg-red-400"
-                    }`}
+                    className={`h-full rounded-full ${metric.status === "atingida"
+                      ? "bg-gradient-to-r from-amber-400 via-indigo-400 to-sky-400"
+                      : metric.status === "em_risco"
+                        ? "bg-amber-400"
+                        : "bg-red-400"
+                      }`}
                     style={{ width: `${Math.min(metric.progressPct, 100)}%` }}
                   />
                 </div>
@@ -744,7 +756,7 @@ export default function AnalyticsPage() {
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
-        <Card className="space-y-4 p-4">
+        <Card className="panel space-y-4 p-4">
           <h3 className="text-lg font-semibold text-white">Comparativo mensal</h3>
           <div className="grid gap-3 sm:grid-cols-3">
             {[
@@ -752,7 +764,7 @@ export default function AnalyticsPage() {
               { label: "Movimentações", metric: data.monthlyComparison.movements },
               { label: "Fechamentos", metric: data.monthlyComparison.closures }
             ].map((item) => (
-              <div key={item.label} className="rounded-xl border border-zinc-800 bg-black/40 p-3">
+              <div key={item.label} className="rounded-xl accent-surface p-3">
                 <p className="text-xs text-zinc-500">{item.label}</p>
                 <p className="mt-1 text-xl font-semibold text-white">
                   {formatNumber(item.metric.current)}
@@ -765,7 +777,7 @@ export default function AnalyticsPage() {
           </div>
         </Card>
 
-        <Card className="space-y-4 p-4">
+        <Card className="panel space-y-4 p-4">
           <h3 className="text-lg font-semibold text-white">Leaderboard</h3>
           <div className="grid gap-4 sm:grid-cols-2">
             <div>

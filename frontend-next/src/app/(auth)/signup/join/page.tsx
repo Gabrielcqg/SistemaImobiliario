@@ -867,7 +867,7 @@ export default function SignupJoinPage() {
         backHref={loginHref}
         backLabel="Voltar para login"
       >
-        <p className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+        <p className="rounded-lg accent-alert px-3 py-2 text-sm text-sky-100">
           Verifique Spam e Lixo eletronico caso o e-mail nao apareca na caixa principal.
           Depois de confirmar, voce volta para esta pagina e escolhe quando aceitar o convite.
         </p>
@@ -971,11 +971,11 @@ export default function SignupJoinPage() {
               ) : null}
 
               {inviteState === "accepted" ? (
-                <div className="space-y-3 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-4 py-4">
-                  <p className="text-sm font-semibold text-emerald-100">
+                <div className="space-y-3 rounded-lg accent-card-highlight px-4 py-4">
+                  <p className="text-sm font-semibold text-sky-100">
                     {alreadyMember ? ALREADY_MEMBER_MESSAGE : ACCEPTED_MESSAGE}
                   </p>
-                  <p className="text-xs text-emerald-200/80">
+                  <p className="accent-text text-xs">
                     Redirecionando para o dashboard...
                   </p>
                   <Button
@@ -1031,7 +1031,7 @@ export default function SignupJoinPage() {
             <p
               role="status"
               aria-live="polite"
-              className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+              className="rounded-lg accent-alert px-3 py-2 text-sm"
             >
               {success}
             </p>
@@ -1089,7 +1089,7 @@ export default function SignupJoinPage() {
             <button
               type="button"
               onClick={handleGoToLogin}
-              className="text-white underline underline-offset-4"
+              className="rim-core rim-secondary inline-flex rounded-full px-2.5 py-1 text-white"
               disabled={isBusy}
             >
               Entrar
@@ -1098,7 +1098,7 @@ export default function SignupJoinPage() {
           <button
             type="button"
             onClick={() => setView("choose")}
-            className="text-xs text-zinc-400 underline underline-offset-4"
+            className="rim-core rim-secondary inline-flex rounded-full px-2.5 py-1 text-xs text-zinc-300"
             disabled={isBusy}
           >
             Voltar para convite
@@ -1162,7 +1162,7 @@ export default function SignupJoinPage() {
           <p
             role="status"
             aria-live="polite"
-            className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+            className="rounded-lg accent-alert px-3 py-2 text-sm"
           >
             {success}
           </p>

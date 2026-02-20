@@ -42,14 +42,14 @@ export default function AuthCard() {
   return (
     <Card
       className={`w-full max-w-md p-8 transition-colors duration-300 ${
-        isLogin ? "border-zinc-800 bg-white/5" : "border-emerald-500/30 bg-emerald-500/5"
+        isLogin ? "border-zinc-800 bg-white/5" : "accent-card-highlight"
       }`}
     >
       <div className="space-y-6">
         <div className="space-y-2">
           <div
             className={`h-1 w-16 rounded-full bg-gradient-to-r transition-all duration-300 ${
-              isLogin ? "from-white to-zinc-500" : "from-emerald-300 to-emerald-600"
+              isLogin ? "from-white to-zinc-500" : "from-amber-400 via-indigo-400 to-sky-400"
             }`}
           />
           <p className="text-xs uppercase tracking-[0.3em] text-zinc-400">
@@ -67,7 +67,7 @@ export default function AuthCard() {
             tabIndex={-1}
             role="status"
             aria-live="polite"
-            className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+            className="rounded-lg accent-alert accent-focus px-3 py-2 text-sm text-sky-100 focus:outline-none"
           >
             E-mail confirmado! Agora voce ja pode fazer login.
           </div>

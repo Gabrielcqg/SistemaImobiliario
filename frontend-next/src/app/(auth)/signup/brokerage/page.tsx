@@ -174,7 +174,7 @@ export default function SignupBrokeragePage() {
         backHref="/login?redirectedFrom=%2Fonboarding%2Fimobiliaria%2Fconvidar"
         backLabel="Voltar para login"
       >
-        <div className="space-y-3 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-4">
+        <div className="space-y-3 rounded-xl accent-card-highlight p-4">
           <p className="text-sm text-zinc-100">
             Verifique Spam e Lixo eletronico se o e-mail nao aparecer na caixa de entrada.
           </p>
@@ -325,7 +325,7 @@ export default function SignupBrokeragePage() {
           <p
             role="status"
             aria-live="polite"
-            className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+            className="rounded-lg accent-alert px-3 py-2 text-sm"
           >
             {success}
           </p>

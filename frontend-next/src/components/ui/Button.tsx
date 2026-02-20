@@ -1,29 +1,45 @@
 import type { ButtonHTMLAttributes } from "react";
+import LedButton from "./LedButton";
 
-type Variant = "primary" | "secondary" | "ghost";
+type Variant = "primary" | "secondary" | "ghost" | "cta";
+type Size = "sm" | "md" | "lg" | "icon";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
+  size?: Size;
+  isLoading?: boolean;
 }
 
-const baseClasses =
-  "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40";
-
-const variants: Record<Variant, string> = {
-  primary: "bg-white text-black hover:bg-zinc-200",
-  secondary: "border border-zinc-800 text-white hover:bg-white/10",
-  ghost: "text-white hover:bg-white/10"
-};
-
+/**
+ * Standardized Button component.
+ * Wraps LedButton with the new interaction-based design system.
+ */
 export default function Button({
   variant = "primary",
+  size = "md",
   className = "",
+  children,
+  isLoading,
   ...props
 }: ButtonProps) {
+
+  // Mapping legacy/standard names to LedButton variants
+  let ledVariant: "solid" | "ghost" | "subtle" | "cta" = "solid";
+
+  if (variant === "primary") ledVariant = "solid"; // Default solid dark button
+  if (variant === "secondary") ledVariant = "subtle";
+  if (variant === "ghost") ledVariant = "ghost";
+  if (variant === "cta") ledVariant = "cta"; // New high-emphasis variant
+
   return (
-    <button
-      className={`${baseClasses} ${variants[variant]} ${className}`.trim()}
+    <LedButton
+      size={size}
+      variant={ledVariant}
+      className={className}
+      isLoading={isLoading}
       {...props}
-    />
+    >
+      {children}
+    </LedButton>
   );
 }

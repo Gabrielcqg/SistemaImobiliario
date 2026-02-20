@@ -34,10 +34,10 @@ export default function SignupChoosePage() {
 
         <Link
           href="/signup/brokerage"
-          className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 transition hover:border-emerald-300/60 hover:bg-emerald-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+          className="rounded-xl accent-card-highlight accent-focus p-4 transition hover:border-white/35 hover:bg-white/[0.07] focus:outline-none"
         >
-          <p className="text-sm font-semibold text-emerald-100">Imobiliaria</p>
-          <p className="mt-1 text-xs text-emerald-200/80">
+          <p className="text-sm font-semibold text-sky-100">Imobiliaria</p>
+          <p className="accent-text mt-1 text-xs">
             Gestao de equipe com contas separadas para cada corretor.
           </p>
         </Link>

@@ -401,7 +401,7 @@ export default function BrokerageInvitesOnboardingPage() {
           <button
             type="button"
             onClick={() => void loadContext()}
-            className="text-sm text-zinc-300 underline underline-offset-4"
+            className="accent-outline accent-sheen accent-focus inline-flex rounded-full px-3 py-1 text-sm text-zinc-200 hover:text-white focus-visible:outline-none"
           >
             Tentar novamente
           </button>
@@ -424,7 +424,7 @@ export default function BrokerageInvitesOnboardingPage() {
           <button
             type="button"
             onClick={() => void loadContext()}
-            className="text-sm text-red-100 underline underline-offset-4"
+            className="accent-outline accent-sheen accent-focus inline-flex rounded-full px-3 py-1 text-sm text-red-100 hover:text-white focus-visible:outline-none"
           >
             Revalidar permissao
           </button>
@@ -436,7 +436,7 @@ export default function BrokerageInvitesOnboardingPage() {
   return (
     <section className="mx-auto w-full max-w-5xl space-y-6">
       <div className="space-y-2">
-        <p className="text-xs uppercase tracking-[0.3em] text-emerald-300">ONBOARDING EQUIPE</p>
+        <p className="accent-text text-xs uppercase tracking-[0.3em]">ONBOARDING EQUIPE</p>
         <h2 className="text-3xl font-semibold text-white">Convide seus corretores</h2>
         <p className="max-w-3xl text-sm text-zinc-300">
           Cada corretor tera uma conta propria (email/senha ou login por codigo) e ficara
@@ -446,7 +446,7 @@ export default function BrokerageInvitesOnboardingPage() {
       </div>
 
       {showWelcome ? (
-        <p className="rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+        <p className="rounded-xl accent-alert px-4 py-3 text-sm text-sky-100">
           Conta criada com sucesso. Agora finalize a configuracao da equipe.
         </p>
       ) : null}
@@ -466,7 +466,7 @@ export default function BrokerageInvitesOnboardingPage() {
         </div>
         <div className="rounded-xl border border-zinc-800 bg-black/30 p-4">
           <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Vagas disponiveis</p>
-          <p className="mt-2 text-2xl font-semibold text-emerald-200">{seatsAvailable}</p>
+          <p className="accent-text mt-2 text-2xl font-semibold">{seatsAvailable}</p>
         </div>
       </div>
 
@@ -482,7 +482,7 @@ export default function BrokerageInvitesOnboardingPage() {
         </label>
         <textarea
           id="brokerage-invite-input"
-          className="min-h-[120px] w-full rounded-lg border border-zinc-800 bg-black/50 px-4 py-3 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-emerald-400/30"
+          className="accent-focus min-h-[120px] w-full rounded-lg border border-zinc-800 bg-black/50 px-4 py-3 text-sm text-white placeholder:text-zinc-500 focus:outline-none"
           placeholder="joao@imobiliaria.com, maria@imobiliaria.com"
           value={inviteInput}
           onChange={(event) => setInviteInput(event.target.value)}
@@ -530,7 +530,7 @@ export default function BrokerageInvitesOnboardingPage() {
         ) : null}
 
         {inviteStatus ? (
-          <p className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+          <p className="rounded-lg accent-alert px-3 py-2 text-sm">
             {inviteStatus}
           </p>
         ) : null}
@@ -551,7 +551,7 @@ export default function BrokerageInvitesOnboardingPage() {
                   </p>
                   <button
                     type="button"
-                    className="text-xs text-emerald-200 underline underline-offset-4"
+                    className="accent-link text-xs underline underline-offset-4"
                     onClick={() =>
                       void handleCopyInviteLink(`${invite.email}-${invite.link}`, invite.link)
                     }
@@ -584,14 +584,14 @@ export default function BrokerageInvitesOnboardingPage() {
                   <div className="mt-2 flex flex-wrap gap-3 text-xs">
                     <button
                       type="button"
-                      className="text-emerald-200 underline underline-offset-4"
+                      className="accent-outline accent-sheen accent-focus rounded-full px-2.5 py-1 text-zinc-100 hover:text-white focus-visible:outline-none"
                       onClick={() => void handleCopyInviteLink(invite.id, invite.inviteToken)}
                     >
                       {copiedInviteId === invite.id ? "Link copiado" : "Copiar link"}
                     </button>
                     <button
                       type="button"
-                      className="text-zinc-300 underline underline-offset-4"
+                      className="accent-outline accent-sheen accent-focus rounded-full px-2.5 py-1 text-zinc-200 hover:text-white focus-visible:outline-none"
                       disabled={workingInviteId === invite.id || !canManageInvites}
                       onClick={() => void handleResendInvite(invite.id, invite.email)}
                     >
@@ -599,7 +599,7 @@ export default function BrokerageInvitesOnboardingPage() {
                     </button>
                     <button
                       type="button"
-                      className="text-red-200 underline underline-offset-4"
+                      className="accent-outline accent-sheen accent-focus rounded-full px-2.5 py-1 text-red-200 hover:text-white focus-visible:outline-none"
                       disabled={workingInviteId === invite.id || !canManageInvites}
                       onClick={() => void handleCancelInvite(invite.id)}
                     >

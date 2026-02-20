@@ -3,20 +3,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import Image from "next/image";
+import { useSearchParams } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
+import ResultOverlay from "@/components/crm/ResultOverlay";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
+import SkeletonList from "@/components/ui/SkeletonList";
 import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
 import { useOrganizationContext } from "@/lib/auth/useOrganizationContext";
+import {
+  createCrmClientBundleQueryOptions,
+  createCrmClientsQueryOptions,
+  crmQueryKeys
+} from "@/lib/crm/query";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
 import { normalizeText } from "@/lib/format/text";
 
 type PipelineStatus =
   | "novo_match"
+  | "contato_feito"
   | "em_conversa"
-  | "aguardando_resposta"
+  | "aguardando_retorno"
   | "visita_agendada"
   | "proposta"
   | "fechado";
@@ -50,6 +60,7 @@ type Client = {
   user_id: string;
   name: string;
   contact_info: { email?: string; phone?: string } | null;
+  added_at?: string | null;
   data_retorno?: string | null;
   descricao_contexto?: string | null;
   status_pipeline?: PipelineStatus | string | null;
@@ -57,7 +68,11 @@ type Client = {
   lost_reason?: LostReasonValue | string | null;
   lost_reason_detail?: string | null;
   next_action?: NextActionValue | string | null;
+  next_action_at?: string | null;
   next_followup_at?: string | null;
+  chase_due_at?: string | null;
+  last_contact_at?: string | null;
+  last_reply_at?: string | null;
   visit_at?: string | null;
   visit_notes?: string | null;
   proposal_value?: number | null;
@@ -115,7 +130,11 @@ type Match = {
 type TimelinePayload = {
   note?: string | null;
   next_action?: NextActionValue | string | null;
+  next_action_at?: string | null;
   next_followup_at?: string | null;
+  chase_due_at?: string | null;
+  last_contact_at?: string | null;
+  last_reply_at?: string | null;
   visit_at?: string | null;
   visit_notes?: string | null;
   proposal_value?: number | null;
@@ -145,7 +164,7 @@ type PipelineModalSource = "pipeline" | "card";
 type PipelineTransitionDraft = {
   next_action: NextActionValue | "";
   no_followup_date: boolean;
-  next_followup_at: string;
+  next_action_at: string;
   note: string;
   closed_outcome: ClosedOutcome;
   lost_reason: LostReasonValue | "";
@@ -172,27 +191,39 @@ type ListingRules = {
 const LAST_VIEWED_KEY = "crm:lastViewedAtByClient";
 const PIPELINE_STEPS = [
   { value: "novo_match", label: "Novo Match" },
+  { value: "contato_feito", label: "Contato feito" },
   { value: "em_conversa", label: "Em Conversa" },
-  { value: "aguardando_resposta", label: "Aguardando resposta" },
+  { value: "aguardando_retorno", label: "Aguardando retorno" },
   { value: "visita_agendada", label: "Visita Agendada" },
   { value: "proposta", label: "Proposta" },
   { value: "fechado", label: "Fechado" }
 ] as const;
 const PIPELINE_INDEX_BY_STATUS: Record<PipelineStatus, number> = {
   novo_match: 0,
-  em_conversa: 1,
-  aguardando_resposta: 2,
-  visita_agendada: 3,
-  proposta: 4,
-  fechado: 5
+  contato_feito: 1,
+  em_conversa: 2,
+  aguardando_retorno: 3,
+  visita_agendada: 4,
+  proposta: 5,
+  fechado: 6
 };
 const PIPELINE_STATUS_LABEL: Record<PipelineStatus, string> = {
   novo_match: "Novo Match",
+  contato_feito: "Contato feito",
   em_conversa: "Em Conversa",
-  aguardando_resposta: "Aguardando resposta",
+  aguardando_retorno: "Aguardando retorno",
   visita_agendada: "Visita Agendada",
   proposta: "Proposta",
   fechado: "Fechado"
+};
+const PIPELINE_STATUS_HELP: Record<PipelineStatus, string> = {
+  novo_match: "Lead entrou e ainda não teve contato inicial.",
+  contato_feito: "Contato inicial realizado; retorno planejado.",
+  em_conversa: "Cliente respondeu e conversa ativa.",
+  aguardando_retorno: "Imóveis/info enviados; aguardando feedback.",
+  visita_agendada: "Visita marcada com data definida.",
+  proposta: "Proposta enviada em negociação.",
+  fechado: "Negócio finalizado (ganho ou perdido)."
 };
 const CLOSED_OUTCOME_OPTIONS = [
   { value: "won", label: "Fechado (Ganho)" },
@@ -243,7 +274,7 @@ const FRESHNESS_OPTIONS = [
 const createInitialPipelineTransitionDraft = (): PipelineTransitionDraft => ({
   next_action: "",
   no_followup_date: false,
-  next_followup_at: "",
+  next_action_at: "",
   note: "",
   closed_outcome: null,
   lost_reason: "",
@@ -255,6 +286,10 @@ const createInitialPipelineTransitionDraft = (): PipelineTransitionDraft => ({
   final_value: "",
   final_note: ""
 });
+
+const CONTACT_CHASE_HOURS = 24;
+const RETURN_CHASE_HOURS = 48;
+const RESULT_OVERLAY_DURATION_MS = 900;
 
 const formatCurrency = (value: number | null) => {
   if (value === null || Number.isNaN(value)) return "—";
@@ -284,6 +319,16 @@ const formatDateTimeDisplay = (value?: string | null) => {
   }).format(date);
 };
 
+const formatDateDisplay = (value?: string | null) => {
+  const date = parseDateSafe(value);
+  if (!date) return "—";
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  }).format(date);
+};
+
 const toDateTimeLocalInputValue = (value?: string | null) => {
   const date = parseDateSafe(value);
   if (!date) return "";
@@ -305,10 +350,29 @@ const toDateInputValue = (value?: string | null) => {
   return date.toISOString().slice(0, 10);
 };
 
+const fromDateInputValueToIso = (value?: string | null) => {
+  if (!value) return null;
+  const parsed = new Date(`${value}T12:00:00`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+};
+
 const isSameDay = (a: Date, b: Date) =>
   a.getFullYear() === b.getFullYear() &&
   a.getMonth() === b.getMonth() &&
   a.getDate() === b.getDate();
+
+const startOfDay = (value: Date) =>
+  new Date(value.getFullYear(), value.getMonth(), value.getDate(), 0, 0, 0, 0);
+
+const endOfDay = (value: Date) =>
+  new Date(value.getFullYear(), value.getMonth(), value.getDate(), 23, 59, 59, 999);
+
+const addHoursIso = (baseIso: string, hours: number) => {
+  const baseDate = parseDateSafe(baseIso);
+  if (!baseDate) return null;
+  return new Date(baseDate.getTime() + hours * 60 * 60 * 1000).toISOString();
+};
 
 const toArray = (value: string) =>
   value
@@ -347,12 +411,95 @@ const parseDecimalInput = (value: string) => {
 
 const normalizePipelineStatus = (value?: string | null): PipelineStatus => {
   if (value === "novo_match") return "novo_match";
+  if (value === "contato_feito") return "contato_feito";
   if (value === "em_conversa") return "em_conversa";
-  if (value === "aguardando_resposta") return "aguardando_resposta";
+  if (value === "aguardando_retorno") return "aguardando_retorno";
+  if (value === "aguardando_resposta") return "aguardando_retorno";
   if (value === "visita_agendada") return "visita_agendada";
   if (value === "proposta") return "proposta";
   if (value === "fechado") return "fechado";
   return "novo_match";
+};
+
+const resolveClientNextActionAt = (client?: Client | null) =>
+  client?.next_action_at ?? client?.next_followup_at ?? client?.data_retorno ?? null;
+
+const resolveClientReturnAnchor = (client?: Client | null) =>
+  resolveClientNextActionAt(client) ?? client?.chase_due_at ?? null;
+
+type DueFilter = "today" | "overdue";
+
+const parseDueFilter = (value: string | null): DueFilter | null => {
+  if (value === "today" || value === "overdue") return value;
+  return null;
+};
+
+const isClientDueToday = (client: Client, now: Date) => {
+  const dayStart = startOfDay(now);
+  const dayEnd = endOfDay(now);
+
+  const nextActionAt = parseDateSafe(resolveClientNextActionAt(client));
+  if (nextActionAt) {
+    return nextActionAt >= dayStart && nextActionAt <= dayEnd;
+  }
+
+  const status = normalizePipelineStatus(client.status_pipeline);
+  if (status !== "contato_feito" && status !== "aguardando_retorno") {
+    return false;
+  }
+
+  const chaseDueAt = parseDateSafe(client.chase_due_at);
+  return chaseDueAt ? chaseDueAt >= dayStart && chaseDueAt <= dayEnd : false;
+};
+
+const isClientOverdue = (client: Client, now: Date) => {
+  const dayStart = startOfDay(now);
+
+  const nextActionAt = parseDateSafe(resolveClientNextActionAt(client));
+  if (nextActionAt) {
+    return nextActionAt < dayStart;
+  }
+
+  const status = normalizePipelineStatus(client.status_pipeline);
+  if (status !== "contato_feito" && status !== "aguardando_retorno") {
+    return false;
+  }
+
+  const chaseDueAt = parseDateSafe(client.chase_due_at);
+  return chaseDueAt ? chaseDueAt < dayStart : false;
+};
+
+const getStageDateRows = (client: Client) => {
+  const status = normalizePipelineStatus(client.status_pipeline);
+  const nextActionAt = resolveClientNextActionAt(client);
+  const returnAnchor = resolveClientReturnAnchor(client);
+
+  if (status === "novo_match") {
+    return [
+      { label: "Entrou em", value: formatDateDisplay(client.added_at ?? client.created_at) },
+      { label: "Próxima ação", value: formatDateTimeDisplay(nextActionAt) }
+    ];
+  }
+
+  if (status === "contato_feito") {
+    return [
+      { label: "Contato em", value: formatDateTimeDisplay(client.last_contact_at) },
+      { label: "Retornar em", value: formatDateTimeDisplay(returnAnchor) }
+    ];
+  }
+
+  if (status === "em_conversa") {
+    return [{ label: "Respondeu em", value: formatDateTimeDisplay(client.last_reply_at) }];
+  }
+
+  if (status === "aguardando_retorno") {
+    return [
+      { label: "Enviado em", value: formatDateTimeDisplay(client.last_contact_at) },
+      { label: "Cobrar em", value: formatDateTimeDisplay(returnAnchor) }
+    ];
+  }
+
+  return [{ label: "Próxima ação", value: formatDateTimeDisplay(nextActionAt) }];
 };
 
 const parseFreshDays = (value: string | number | null | undefined) => {
@@ -422,6 +569,8 @@ const saveLastViewedMap = (next: Record<string, string>) => {
 
 export default function CrmPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+  const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
   const {
     context: organizationContext,
     organizationId,
@@ -430,19 +579,19 @@ export default function CrmPage() {
     error: organizationError
   } = useOrganizationContext();
 
-  const [clients, setClients] = useState<Client[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [clientDraft, setClientDraft] = useState({
     name: "",
     email: "",
     phone: "",
-    data_retorno: "",
+    next_action_at: "",
     descricao_contexto: "",
     status_pipeline: PIPELINE_STEPS[0].value as string
   });
   const [isCreatingClient, setIsCreatingClient] = useState(false);
   const [clientSaving, setClientSaving] = useState(false);
   const [clientError, setClientError] = useState<string | null>(null);
+  const [isLoadingClients, setIsLoadingClients] = useState(true);
 
   const [filterDraft, setFilterDraft] = useState({
     active: true,
@@ -494,6 +643,10 @@ export default function CrmPage() {
   const [statusModalOpen, setStatusModalOpen] = useState(false);
   const [statusModalSaving, setStatusModalSaving] = useState(false);
   const [statusModalError, setStatusModalError] = useState<string | null>(null);
+  const [clientFormModalOpen, setClientFormModalOpen] = useState(false);
+  const [resultOverlayType, setResultOverlayType] = useState<"won" | "lost" | null>(
+    null
+  );
   const [statusModalTarget, setStatusModalTarget] =
     useState<PipelineStatus>("novo_match");
   const [statusModalFrom, setStatusModalFrom] =
@@ -520,61 +673,40 @@ export default function CrmPage() {
   const queueRef = useRef<Match[]>([]);
   const queueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pipelineAnimationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resultOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const processingQueueRef = useRef(false);
+  const selectedClientIdRef = useRef<string | null>(null);
+  const lastAppliedClientsBundleKeyRef = useRef<string | null>(null);
+  const lastAppliedClientBundleKeyRef = useRef<string | null>(null);
   const lastViewedAtRef = useRef<Record<string, string>>({});
   const matchIdsRef = useRef<Set<string>>(new Set());
   const pipelineChipsRef = useRef<HTMLDivElement | null>(null);
   const pipelineButtonRefs = useRef<Record<PipelineStatus, HTMLButtonElement | null>>(
     {
       novo_match: null,
+      contato_feito: null,
       em_conversa: null,
-      aguardando_resposta: null,
+      aguardando_retorno: null,
       visita_agendada: null,
       proposta: null,
       fechado: null
     }
   );
-  const fetchClientsRef = useRef<(nextSelectedId?: string) => Promise<void>>(
-    async () => {}
-  );
-  const fetchClientAlertsRef = useRef<() => Promise<void>>(async () => {});
-  const fetchFilterRef = useRef<(clientId: string) => Promise<ClientFilter | null>>(
-    async () => null
-  );
-  const fetchMatchesRef = useRef<
-    (
-      clientId: string,
-      page: number,
-      filterOverride?: ClientFilter | null
-    ) => Promise<void>
-  >(async () => {});
-  const fetchHistoryRef = useRef<
-    (
-      clientId: string,
-      page: number,
-      filterOverride?: ClientFilter | null
-    ) => Promise<void>
-  >(async () => {});
-  const fetchArchivedRef = useRef<
-    (
-      clientId: string,
-      page: number,
-      filterOverride?: ClientFilter | null
-    ) => Promise<void>
-  >(async () => {});
-  const fetchTimelineRef = useRef<(clientId: string) => Promise<void>>(
-    async () => {}
-  );
-  const acknowledgeClientViewRef = useRef<(clientId: string) => void>(() => {});
+  const acknowledgeClientViewRef = useRef<(clientId: string) => void>(() => { });
   const listingRulesRef = useRef<ListingRules | null>(null);
 
-  const selectedClient =
-    clients.find((client) => client.id === selectedClientId) ?? null;
   const confirmedPipelineStatus = normalizePipelineStatus(clientDraft.status_pipeline);
   const displayIndex = isPipelineAnimating ? animIndex : confirmedIndex;
   const displayPipelineStatus =
     PIPELINE_STEPS[displayIndex]?.value ?? PIPELINE_STEPS[0].value;
+  const isResultOverlayVisible = Boolean(resultOverlayType);
   const statusModalIsActivityOnly = statusModalFrom === statusModalTarget;
+  const statusModalScheduleLabel =
+    statusModalTarget === "contato_feito"
+      ? "Retornar em"
+      : statusModalTarget === "aguardando_retorno"
+        ? "Cobrar em"
+        : "Próxima ação";
   const pipelineProgressPercent =
     PIPELINE_STEPS.length > 1
       ? (displayIndex / (PIPELINE_STEPS.length - 1)) * 100
@@ -586,6 +718,82 @@ export default function CrmPage() {
   const selectedPropertyTypes = useMemo(
     () => toPropertyTypeValues(filterDraft.property_types),
     [filterDraft.property_types]
+  );
+  const requestedClientId = useMemo(() => {
+    const value = searchParams.get("clientId");
+    return value && value.trim().length > 0 ? value.trim() : null;
+  }, [searchParams]);
+  const requestedDueFilter = useMemo(
+    () => parseDueFilter(searchParams.get("due")),
+    [searchParams]
+  );
+  const clientsQueryOptions = useMemo(
+    () =>
+      createCrmClientsQueryOptions({
+        supabase,
+        organizationId: organizationId ?? "__no-org__"
+      }),
+    [organizationId, supabase]
+  );
+  const selectedClientBundleQueryOptions = useMemo(
+    () =>
+      createCrmClientBundleQueryOptions({
+        supabase,
+        organizationId: organizationId ?? "__no-org__",
+        clientId: selectedClientId ?? "__no-client__"
+      }),
+    [organizationId, selectedClientId, supabase]
+  );
+  const clientsQuery = useQuery({
+    ...clientsQueryOptions,
+    enabled: Boolean(organizationId && !organizationLoading),
+    placeholderData: (previous) => previous
+  });
+  const selectedClientBundleQuery = useQuery({
+    ...selectedClientBundleQueryOptions,
+    enabled: Boolean(organizationId && selectedClientId),
+    placeholderData: (previous) => previous
+  });
+  const clientsSource = useMemo(
+    () => clientsQuery.data?.clients ?? [],
+    [clientsQuery.data]
+  );
+  const activeClientsSource = useMemo(
+    () =>
+      clientsSource.filter(
+        (client) => normalizePipelineStatus(client.status_pipeline) !== "fechado"
+      ),
+    [clientsSource]
+  );
+  const selectedClient = useMemo(
+    () => activeClientsSource.find((client) => client.id === selectedClientId) ?? null,
+    [activeClientsSource, selectedClientId]
+  );
+  const visibleClients = useMemo(() => {
+    if (!requestedDueFilter) return activeClientsSource;
+    const now = new Date();
+    if (requestedDueFilter === "today") {
+      return activeClientsSource.filter((client) => isClientDueToday(client, now));
+    }
+    return activeClientsSource.filter((client) => isClientOverdue(client, now));
+  }, [activeClientsSource, requestedDueFilter]);
+  const userClosureCounts = useMemo(
+    () =>
+      clientsSource.reduce(
+        (acc, client) => {
+          if (normalizePipelineStatus(client.status_pipeline) !== "fechado") {
+            return acc;
+          }
+          if (client.closed_outcome === "won") {
+            acc.won += 1;
+          } else if (client.closed_outcome === "lost") {
+            acc.lost += 1;
+          }
+          return acc;
+        },
+        { won: 0, lost: 0 }
+      ),
+    [clientsSource]
   );
 
   const getAuthenticatedUserId = useCallback(async () => {
@@ -605,12 +813,12 @@ export default function CrmPage() {
 
   const isClientOwnedByUser = useCallback(
     (clientId: string, userId: string) =>
-      clients.some((client) => {
+      clientsSource.some((client) => {
         if (client.id !== clientId) return false;
         const ownerId = client.owner_user_id ?? client.user_id;
         return ownerId === userId;
       }),
-    [clients]
+    [clientsSource]
   );
 
   const clearPipelineAnimationTimer = useCallback(() => {
@@ -668,6 +876,22 @@ export default function CrmPage() {
     [clearPipelineAnimationTimer, prefersReducedMotion]
   );
 
+  const playResultOverlay = useCallback(async (type: "won" | "lost") => {
+    setResultOverlayType(type);
+
+    await new Promise<void>((resolve) => {
+      if (resultOverlayTimerRef.current) {
+        clearTimeout(resultOverlayTimerRef.current);
+      }
+      resultOverlayTimerRef.current = setTimeout(() => {
+        resultOverlayTimerRef.current = null;
+        resolve();
+      }, RESULT_OVERLAY_DURATION_MS);
+    });
+
+    setResultOverlayType(null);
+  }, []);
+
   const recalculatePipelineTrack = useCallback(() => {
     const container = pipelineChipsRef.current;
     const first = pipelineButtonRefs.current[PIPELINE_STEPS[0].value];
@@ -711,6 +935,15 @@ export default function CrmPage() {
   }, [confirmedPipelineStatus, isPipelineAnimating]);
 
   useEffect(() => () => clearPipelineAnimationTimer(), [clearPipelineAnimationTimer]);
+
+  useEffect(
+    () => () => {
+      if (resultOverlayTimerRef.current) {
+        clearTimeout(resultOverlayTimerRef.current);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     const raf = window.requestAnimationFrame(recalculatePipelineTrack);
@@ -766,16 +999,85 @@ export default function CrmPage() {
     setPropertyTypeList([...selectedPropertyTypes, value]);
   };
 
-  const resetDraftFromClient = (client: Client | null) => {
-    setClientDraft({
+  const resetDraftFromClient = useCallback((client: Client | null) => {
+    const nextDraft = {
       name: client?.name ?? "",
       email: client?.contact_info?.email ?? "",
       phone: client?.contact_info?.phone ?? "",
-      data_retorno: toDateInputValue(client?.data_retorno ?? null),
+      next_action_at: toDateInputValue(resolveClientNextActionAt(client)),
       descricao_contexto: client?.descricao_contexto ?? "",
       status_pipeline: normalizePipelineStatus(client?.status_pipeline)
+    };
+    setClientDraft((previous) => {
+      if (
+        previous.name === nextDraft.name &&
+        previous.email === nextDraft.email &&
+        previous.phone === nextDraft.phone &&
+        previous.next_action_at === nextDraft.next_action_at &&
+        previous.descricao_contexto === nextDraft.descricao_contexto &&
+        previous.status_pipeline === nextDraft.status_pipeline
+      ) {
+        return previous;
+      }
+      return nextDraft;
     });
-  };
+  }, []);
+
+  const openCreateClientForm = useCallback(() => {
+    setIsCreatingClient(true);
+    setClientError(null);
+    setClientDraft({
+      name: "",
+      email: "",
+      phone: "",
+      next_action_at: "",
+      descricao_contexto: "",
+      status_pipeline: PIPELINE_STEPS[0].value
+    });
+    setClientFormModalOpen(true);
+  }, []);
+
+  const openEditClientForm = useCallback(() => {
+    if (!selectedClient) return;
+    setIsCreatingClient(false);
+    setClientError(null);
+    resetDraftFromClient(selectedClient);
+    setClientFormModalOpen(true);
+  }, [resetDraftFromClient, selectedClient]);
+
+  const closeClientFormModal = useCallback(() => {
+    if (clientSaving) return;
+    setClientFormModalOpen(false);
+    if (isCreatingClient) {
+      setIsCreatingClient(false);
+    }
+    if (selectedClient) {
+      resetDraftFromClient(selectedClient);
+    }
+  }, [clientSaving, isCreatingClient, resetDraftFromClient, selectedClient]);
+
+  useEffect(() => {
+    if (!requestedDueFilter || isCreatingClient || visibleClients.length === 0) {
+      return;
+    }
+
+    if (
+      selectedClientId &&
+      visibleClients.some((client) => client.id === selectedClientId)
+    ) {
+      return;
+    }
+
+    const firstClient = visibleClients[0];
+    setSelectedClientId(firstClient.id);
+    resetDraftFromClient(firstClient);
+  }, [
+    isCreatingClient,
+    resetDraftFromClient,
+    requestedDueFilter,
+    selectedClientId,
+    visibleClients
+  ]);
 
   const getStatusLabel = (status?: string | null) =>
     PIPELINE_STATUS_LABEL[normalizePipelineStatus(status)];
@@ -833,9 +1135,9 @@ export default function CrmPage() {
         : parseMinInput(filterDraft.max_area_m2);
     const propertyTypes = Array.isArray(override?.property_types)
       ? override.property_types.filter(
-          (item): item is PropertyTypeValue =>
-            PROPERTY_TYPE_SET.has(item as PropertyTypeValue)
-        )
+        (item): item is PropertyTypeValue =>
+          PROPERTY_TYPE_SET.has(item as PropertyTypeValue)
+      )
       : selectedPropertyTypes;
 
     return {
@@ -1017,7 +1319,6 @@ export default function CrmPage() {
     });
     setClientAlerts(counts);
   };
-  fetchClientAlertsRef.current = fetchClientAlerts;
 
   const acknowledgeClientView = (clientId: string) => {
     const now = new Date().toISOString();
@@ -1103,106 +1404,98 @@ export default function CrmPage() {
     process();
   };
 
-  const fetchClients = async (nextSelectedId?: string) => {
-    if (!organizationId) {
-      setClients([]);
-      setSelectedClientId(null);
-      return;
-    }
-
-    const ownerUserId = await getAuthenticatedUserId();
-    if (!ownerUserId) {
-      setClientError("Usuário não autenticado para carregar clientes.");
-      setClients([]);
-      setSelectedClientId(null);
-      return;
-    }
-
-    setClientError(null);
-    const selectOwnerScopedWithPipelineMetadata =
-      "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, closed_outcome, lost_reason, lost_reason_detail, next_action, next_followup_at, visit_at, visit_notes, proposal_value, proposal_valid_until, last_status_change_at, created_at";
-    const selectOwnerScopedLegacyColumns =
-      "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at";
-    const selectLegacyWithoutOwnerColumn =
-      "id, org_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at";
-
-    const primary = await supabase
-      .from("clients")
-      .select(selectOwnerScopedWithPipelineMetadata)
-      .eq("org_id", organizationId)
-      .eq("owner_user_id", ownerUserId);
-    let data = (primary.data as Client[] | null) ?? null;
-    let error = primary.error;
-
-    if (error && isMissingColumnError(error.message)) {
-      const fallback = await supabase
-        .from("clients")
-        .select(selectOwnerScopedLegacyColumns)
-        .eq("org_id", organizationId)
-        .eq("owner_user_id", ownerUserId);
-      data = (fallback.data as Client[] | null) ?? null;
-      error = fallback.error;
-    }
-
-    if (error && isMissingColumnError(error.message)) {
-      const legacyOwnerFallback = await supabase
-        .from("clients")
-        .select(selectLegacyWithoutOwnerColumn)
-        .eq("org_id", organizationId)
-        .eq("user_id", ownerUserId);
-      data = (legacyOwnerFallback.data as Client[] | null) ?? null;
-      error = legacyOwnerFallback.error;
-    }
-
-    if (error) {
-      setClientError(error.message);
-      console.error("Erro ao buscar clients:", error);
-      return;
-    }
-
-    const rows = ((data as Client[]) ?? []).map((client) => ({
-      ...client,
-      owner_user_id: client.owner_user_id ?? client.user_id
-    }));
-    const today = new Date();
-    const sorted = [...rows].sort((a, b) => {
-      const dateA = parseDateSafe(a.data_retorno);
-      const dateB = parseDateSafe(b.data_retorno);
-
-      if (dateA && dateB) {
-        const isPastA =
-          isSameDay(dateA, today) || dateA.getTime() < today.getTime();
-        const isPastB =
-          isSameDay(dateB, today) || dateB.getTime() < today.getTime();
-        if (isPastA !== isPastB) return isPastA ? -1 : 1;
-        return dateA.getTime() - dateB.getTime();
+  const applyClientsBundle = useCallback(
+    (
+      bundle: {
+        clients: Client[];
+        clientAlerts: Record<string, number>;
+      },
+      options?: {
+        nextSelectedId?: string | null;
       }
-      if (dateA) return -1;
-      if (dateB) return 1;
-      return (b.created_at || "").localeCompare(a.created_at || "");
-    });
+    ) => {
+      const sorted = bundle.clients;
+      const activeClients = sorted.filter(
+        (client) => normalizePipelineStatus(client.status_pipeline) !== "fechado"
+      );
+      setClientAlerts(bundle.clientAlerts);
+      setClientError(null);
+      setAlertsError(null);
+      setIsLoadingClients(false);
 
-    setClients(sorted);
-    await fetchClientAlerts(ownerUserId);
+      if (activeClients.length === 0) {
+        setIsCreatingClient(false);
+        setSelectedClientId(null);
+        return;
+      }
 
-    if (sorted.length === 0) {
-      setIsCreatingClient(true);
-      setSelectedClientId(null);
-    }
+      const requestedSelection = requestedDueFilter ? null : requestedClientId;
+      const preferredSelection =
+        options?.nextSelectedId ??
+        requestedSelection ??
+        selectedClientIdRef.current ??
+        null;
 
-    if (nextSelectedId) {
-      setSelectedClientId(nextSelectedId);
-      const found = sorted.find((client) => client.id === nextSelectedId) ?? null;
-      resetDraftFromClient(found);
-      return;
-    }
+      if (preferredSelection) {
+        const found =
+          activeClients.find((client) => client.id === preferredSelection) ?? null;
+        if (found) {
+          setSelectedClientId(preferredSelection);
+          setIsCreatingClient(false);
+          resetDraftFromClient(found);
+          return;
+        }
+      }
 
-    if (!selectedClientId && sorted.length > 0) {
-      setSelectedClientId(sorted[0].id);
-      resetDraftFromClient(sorted[0]);
-    }
-  };
-  fetchClientsRef.current = fetchClients;
+      const fallbackClient = activeClients[0];
+      setSelectedClientId(fallbackClient.id);
+      setIsCreatingClient(false);
+      resetDraftFromClient(fallbackClient);
+    },
+    [requestedClientId, requestedDueFilter, resetDraftFromClient]
+  );
+
+  const fetchClients = useCallback(
+    async (nextSelectedId?: string) => {
+      if (!organizationId) {
+        setClientAlerts({});
+        setSelectedClientId(null);
+        setClientError(null);
+        setAlertsError(null);
+        setIsLoadingClients(false);
+        return;
+      }
+
+      const queryOptions = createCrmClientsQueryOptions({
+        supabase,
+        organizationId
+      });
+      const cached = queryClient.getQueryData<{
+        clients: Client[];
+        clientAlerts: Record<string, number>;
+      }>(queryOptions.queryKey);
+      if (cached) {
+        applyClientsBundle(cached, { nextSelectedId });
+      } else if (clientsSource.length === 0) {
+        setIsLoadingClients(true);
+      }
+
+      try {
+        const fresh = await queryClient.fetchQuery({
+          ...queryOptions,
+          staleTime: 0
+        });
+        applyClientsBundle(fresh, { nextSelectedId });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Erro ao carregar clientes.";
+        setClientError(message);
+        setAlertsError(message);
+        setIsLoadingClients(false);
+      }
+    },
+    [applyClientsBundle, clientsSource.length, organizationId, queryClient, supabase]
+  );
 
   const fetchTimeline = async (clientId: string) => {
     if (!organizationId) {
@@ -1249,7 +1542,6 @@ export default function CrmPage() {
 
     setTimelineLoading(false);
   };
-  fetchTimelineRef.current = fetchTimeline;
 
   const openStatusTransitionModal = (
     nextStatus: PipelineStatus,
@@ -1277,14 +1569,24 @@ export default function CrmPage() {
       nextDraft.next_action = selectedClient.next_action as NextActionValue;
     }
 
-    if (selectedClient.next_followup_at) {
+    const persistedNextActionAt = resolveClientReturnAnchor(selectedClient);
+    if (persistedNextActionAt) {
       nextDraft.no_followup_date = false;
-      nextDraft.next_followup_at = toDateTimeLocalInputValue(
-        selectedClient.next_followup_at
-      );
+      nextDraft.next_action_at = toDateTimeLocalInputValue(persistedNextActionAt);
     } else {
       nextDraft.no_followup_date = true;
-      nextDraft.next_followup_at = "";
+      nextDraft.next_action_at = "";
+    }
+
+    if (
+      (nextStatus === "contato_feito" || nextStatus === "aguardando_retorno") &&
+      !nextDraft.next_action_at
+    ) {
+      const suggestionHours =
+        nextStatus === "contato_feito" ? CONTACT_CHASE_HOURS : RETURN_CHASE_HOURS;
+      const suggestedIso = new Date(Date.now() + suggestionHours * 60 * 60 * 1000).toISOString();
+      nextDraft.no_followup_date = false;
+      nextDraft.next_action_at = toDateTimeLocalInputValue(suggestedIso);
     }
 
     if (nextStatus === "visita_agendada") {
@@ -1305,7 +1607,7 @@ export default function CrmPage() {
     if (nextStatus === "fechado") {
       nextDraft.closed_outcome =
         selectedClient.closed_outcome === "won" ||
-        selectedClient.closed_outcome === "lost"
+          selectedClient.closed_outcome === "lost"
           ? selectedClient.closed_outcome
           : "won";
       if (
@@ -1358,24 +1660,16 @@ export default function CrmPage() {
       return;
     }
 
-    if (!transitionDraft.next_action) {
-      setStatusModalError("Selecione a próxima ação.");
+    const parsedNextActionAt = transitionDraft.next_action_at
+      ? fromDateTimeLocalInputValue(transitionDraft.next_action_at)
+      : null;
+
+    if (transitionDraft.next_action_at && !parsedNextActionAt) {
+      setStatusModalError("Data da próxima ação inválida.");
       return;
     }
 
-    if (!transitionDraft.no_followup_date && !transitionDraft.next_followup_at) {
-      setStatusModalError("Defina a data/hora do próximo follow-up ou marque sem data.");
-      return;
-    }
-
-    const nextFollowUpAt = transitionDraft.no_followup_date
-      ? null
-      : fromDateTimeLocalInputValue(transitionDraft.next_followup_at);
-
-    if (!transitionDraft.no_followup_date && !nextFollowUpAt) {
-      setStatusModalError("Data do follow-up inválida.");
-      return;
-    }
+    const nextActionAt = transitionDraft.no_followup_date ? null : parsedNextActionAt;
 
     let visitAt: string | null = null;
     if (statusModalTarget === "visita_agendada") {
@@ -1426,6 +1720,18 @@ export default function CrmPage() {
 
     const finalValue = parseDecimalInput(transitionDraft.final_value);
     const nowIso = new Date().toISOString();
+    const isContactStage =
+      statusModalTarget === "contato_feito" || statusModalTarget === "aguardando_retorno";
+    const shouldTrackReply = statusModalTarget === "em_conversa";
+    const lastContactAt = isContactStage ? nowIso : selectedClient.last_contact_at ?? null;
+    const lastReplyAt = shouldTrackReply ? nowIso : selectedClient.last_reply_at ?? null;
+    const autoChaseDueAt = isContactStage
+      ? addHoursIso(
+        nowIso,
+        statusModalTarget === "contato_feito" ? CONTACT_CHASE_HOURS : RETURN_CHASE_HOURS
+      )
+      : null;
+    const chaseDueAt = isContactStage ? nextActionAt ?? autoChaseDueAt : null;
 
     const isStatusChange = statusModalTarget !== statusModalFrom;
     const updatePayload: Record<string, unknown> = {
@@ -1439,21 +1745,49 @@ export default function CrmPage() {
         statusModalTarget === "fechado" && closedOutcome === "lost"
           ? lostReasonDetail
           : null,
-      next_action: transitionDraft.next_action,
-      next_followup_at: nextFollowUpAt
+      next_action: transitionDraft.next_action || null,
+      next_action_at: nextActionAt,
+      next_followup_at: nextActionAt,
+      chase_due_at: chaseDueAt,
+      last_contact_at: lastContactAt,
+      last_reply_at: lastReplyAt,
+      data_retorno: nextActionAt ? nextActionAt.slice(0, 10) : null
     };
     if (isStatusChange) {
       updatePayload.last_status_change_at = nowIso;
     }
 
+    const legacyUpdatePayload: Record<string, unknown> = {
+      status_pipeline: statusModalTarget,
+      closed_outcome: statusModalTarget === "fechado" ? closedOutcome : null,
+      lost_reason:
+        statusModalTarget === "fechado" && closedOutcome === "lost"
+          ? lostReason
+          : null,
+      lost_reason_detail:
+        statusModalTarget === "fechado" && closedOutcome === "lost"
+          ? lostReasonDetail
+          : null,
+      next_action: transitionDraft.next_action || null,
+      next_followup_at: nextActionAt,
+      data_retorno: nextActionAt ? nextActionAt.slice(0, 10) : null
+    };
+    if (isStatusChange) {
+      legacyUpdatePayload.last_status_change_at = nowIso;
+    }
+
     if (statusModalTarget === "visita_agendada") {
       updatePayload.visit_at = visitAt;
       updatePayload.visit_notes = transitionDraft.visit_notes.trim() || null;
+      legacyUpdatePayload.visit_at = visitAt;
+      legacyUpdatePayload.visit_notes = transitionDraft.visit_notes.trim() || null;
     }
 
     if (statusModalTarget === "proposta") {
       updatePayload.proposal_value = proposalValue;
       updatePayload.proposal_valid_until = proposalValidUntil;
+      legacyUpdatePayload.proposal_value = proposalValue;
+      legacyUpdatePayload.proposal_valid_until = proposalValidUntil;
     }
 
     setStatusModalSaving(true);
@@ -1470,7 +1804,7 @@ export default function CrmPage() {
     if (updateError && isMissingColumnError(updateError.message)) {
       const fallback = await supabase
         .from("clients")
-        .update(updatePayload)
+        .update(legacyUpdatePayload)
         .eq("id", selectedClientId)
         .eq("org_id", organizationId)
         .eq("user_id", ownerUserId);
@@ -1487,8 +1821,12 @@ export default function CrmPage() {
     const timelinePayload: TimelinePayload = {
       source: statusModalSource,
       note: transitionDraft.note.trim() || null,
-      next_action: transitionDraft.next_action,
-      next_followup_at: nextFollowUpAt,
+      next_action: transitionDraft.next_action || null,
+      next_action_at: nextActionAt,
+      next_followup_at: nextActionAt,
+      chase_due_at: chaseDueAt,
+      last_contact_at: lastContactAt,
+      last_reply_at: lastReplyAt,
       visit_at: visitAt,
       visit_notes: transitionDraft.visit_notes.trim() || null,
       proposal_value: proposalValue,
@@ -1523,10 +1861,18 @@ export default function CrmPage() {
     const targetIndex = PIPELINE_INDEX_BY_STATUS[statusModalTarget];
     setConfirmedIndex(targetIndex);
     setClientDraft((prev) => ({ ...prev, status_pipeline: statusModalTarget }));
-    setClients((prev) =>
-      prev.map((client) =>
-        client.id === selectedClientId
-          ? {
+    queryClient.setQueryData<{
+      ownerUserId: string;
+      clients: Client[];
+      clientAlerts: Record<string, number>;
+    }>(crmQueryKeys.clients(organizationId), (previous) => {
+      if (!previous) return previous;
+
+      return {
+        ...previous,
+        clients: previous.clients.map((client) =>
+          client.id === selectedClientId
+            ? {
               ...client,
               status_pipeline: statusModalTarget,
               closed_outcome:
@@ -1539,8 +1885,13 @@ export default function CrmPage() {
                 statusModalTarget === "fechado" && closedOutcome === "lost"
                   ? lostReasonDetail
                   : null,
-              next_action: transitionDraft.next_action,
-              next_followup_at: nextFollowUpAt,
+              next_action: transitionDraft.next_action || null,
+              next_action_at: nextActionAt,
+              next_followup_at: nextActionAt,
+              chase_due_at: chaseDueAt,
+              last_contact_at: lastContactAt,
+              last_reply_at: lastReplyAt,
+              data_retorno: nextActionAt ? nextActionAt.slice(0, 10) : null,
               visit_at: statusModalTarget === "visita_agendada" ? visitAt : client.visit_at,
               visit_notes:
                 statusModalTarget === "visita_agendada"
@@ -1556,16 +1907,58 @@ export default function CrmPage() {
                 ? nowIso
                 : client.last_status_change_at
             }
-          : client
-      )
-    );
+            : client
+        )
+      };
+    });
+    const updatedClientsSnapshot = queryClient.getQueryData<{
+      ownerUserId: string;
+      clients: Client[];
+      clientAlerts: Record<string, number>;
+    }>(crmQueryKeys.clients(organizationId));
+    const nextActiveClient =
+      updatedClientsSnapshot?.clients.find(
+        (client) =>
+          client.id !== selectedClientId &&
+          normalizePipelineStatus(client.status_pipeline) !== "fechado"
+      ) ?? null;
 
-    await fetchTimelineRef.current(selectedClientId);
     setStatusModalOpen(false);
     setPendingIndex(null);
     setStatusModalError(null);
     setStatusModalSaving(false);
-    await playPipelineProgressAnimation(targetIndex);
+
+    const closureType =
+      statusModalTarget === "fechado" &&
+      (closedOutcome === "won" || closedOutcome === "lost")
+        ? closedOutcome
+        : null;
+
+    if (closureType) {
+      await playResultOverlay(closureType);
+      if (nextActiveClient) {
+        setSelectedClientId(nextActiveClient.id);
+        setIsCreatingClient(false);
+        resetDraftFromClient(nextActiveClient);
+      } else {
+        setSelectedClientId(null);
+        setIsCreatingClient(false);
+      }
+    } else {
+      await fetchTimeline(selectedClientId);
+      await playPipelineProgressAnimation(targetIndex);
+    }
+
+    await Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: crmQueryKeys.clients(organizationId),
+        exact: true
+      }),
+      queryClient.invalidateQueries({
+        queryKey: crmQueryKeys.clientBundle(organizationId, selectedClientId),
+        exact: true
+      })
+    ]);
   };
 
   const fetchFilter = async (clientId: string) => {
@@ -1628,15 +2021,14 @@ export default function CrmPage() {
       max_days_fresh: filter?.max_days_fresh?.toString() ?? "15",
       property_types: Array.isArray(filter?.property_types)
         ? filter?.property_types
-            .filter((item) => PROPERTY_TYPE_SET.has(item as PropertyTypeValue))
-            .join(", ")
+          .filter((item) => PROPERTY_TYPE_SET.has(item as PropertyTypeValue))
+          .join(", ")
         : ""
     });
     setNeighborhoodInput("");
 
     return filter;
   };
-  fetchFilterRef.current = fetchFilter;
 
   const fetchMatches = async (
     clientId: string,
@@ -1678,7 +2070,6 @@ export default function CrmPage() {
 
     setMatchesLoading(false);
   };
-  fetchMatchesRef.current = fetchMatches;
 
   const fetchHistory = async (
     clientId: string,
@@ -1721,7 +2112,6 @@ export default function CrmPage() {
 
     setHistoryLoading(false);
   };
-  fetchHistoryRef.current = fetchHistory;
 
   const fetchArchived = async (
     clientId: string,
@@ -1764,7 +2154,6 @@ export default function CrmPage() {
 
     setArchivedLoading(false);
   };
-  fetchArchivedRef.current = fetchArchived;
 
   useEffect(() => {
     setLastViewedAtByClient(loadLastViewedMap());
@@ -1773,6 +2162,10 @@ export default function CrmPage() {
   useEffect(() => {
     setIsClientSide(true);
   }, []);
+
+  useEffect(() => {
+    selectedClientIdRef.current = selectedClientId;
+  }, [selectedClientId]);
 
   useEffect(() => {
     clearPipelineAnimationTimer();
@@ -1784,17 +2177,55 @@ export default function CrmPage() {
   useEffect(() => {
     if (organizationLoading) return;
     if (!organizationId) {
-      setClients([]);
+      lastAppliedClientsBundleKeyRef.current = null;
+      lastAppliedClientBundleKeyRef.current = null;
+      setClientAlerts({});
       setSelectedClientId(null);
+      setMatches([]);
+      setHistory([]);
+      setArchived([]);
       setTimelineEvents([]);
+      setIsLoadingClients(false);
       return;
     }
-    fetchClientsRef.current();
-  }, [organizationId, organizationLoading]);
+    if (clientsSource.length === 0 && clientsQuery.isPending) {
+      setIsLoadingClients(true);
+    }
+  }, [clientsQuery.isPending, clientsSource.length, organizationId, organizationLoading]);
+
+  useEffect(() => {
+    if (!organizationId || !clientsQuery.data) return;
+    const applyKey = `${organizationId}:${clientsQuery.dataUpdatedAt}:${requestedDueFilter ?? "none"}:${requestedClientId ?? "none"
+      }`;
+    if (lastAppliedClientsBundleKeyRef.current === applyKey) {
+      return;
+    }
+    lastAppliedClientsBundleKeyRef.current = applyKey;
+    applyClientsBundle(clientsQuery.data, {
+      nextSelectedId: requestedDueFilter ? undefined : requestedClientId ?? undefined
+    });
+  }, [
+    applyClientsBundle,
+    clientsQuery.data,
+    clientsQuery.dataUpdatedAt,
+    organizationId,
+    requestedClientId,
+    requestedDueFilter
+  ]);
+
+  useEffect(() => {
+    if (!organizationId || !clientsQuery.error) return;
+    const message =
+      clientsQuery.error instanceof Error
+        ? clientsQuery.error.message
+        : "Erro ao carregar clientes.";
+    setClientError(message);
+    setAlertsError(message);
+    setIsLoadingClients(false);
+  }, [clientsQuery.error, organizationId]);
 
   useEffect(() => {
     lastViewedAtRef.current = lastViewedAtByClient;
-    fetchClientAlertsRef.current();
   }, [lastViewedAtByClient]);
 
   useEffect(() => {
@@ -1805,37 +2236,117 @@ export default function CrmPage() {
 
   useEffect(() => {
     if (!organizationId || !selectedClientId) {
+      lastAppliedClientBundleKeyRef.current = null;
+      setFilterError(null);
+      setMatches([]);
+      setHistory([]);
+      setArchived([]);
+      setMatchesPage(0);
+      setHistoryPage(0);
+      setArchivedPage(0);
       setTimelineEvents([]);
+      setMatchesLoading(false);
+      setHistoryLoading(false);
+      setArchivedLoading(false);
       setTimelineLoading(false);
       return;
     }
-    setMatches([]);
+    if (selectedClientBundleQuery.isPending && !selectedClientBundleQuery.data) {
+      setMatchesLoading(true);
+      setHistoryLoading(true);
+      setArchivedLoading(true);
+      setTimelineLoading(true);
+    }
+  }, [
+    organizationId,
+    selectedClientBundleQuery.data,
+    selectedClientBundleQuery.isPending,
+    selectedClientId
+  ]);
+
+  useEffect(() => {
+    if (!organizationId || !selectedClientId || !selectedClientBundleQuery.data) {
+      return;
+    }
+    const applyKey = `${organizationId}:${selectedClientId}:${selectedClientBundleQuery.dataUpdatedAt}`;
+    if (lastAppliedClientBundleKeyRef.current === applyKey) {
+      return;
+    }
+    lastAppliedClientBundleKeyRef.current = applyKey;
+
+    const bundle = selectedClientBundleQuery.data;
+    const filter = bundle.filter;
+
+    setFilterError(null);
+    setFilterDraft({
+      active: filter?.active ?? true,
+      min_price:
+        typeof filter?.min_price === "number"
+          ? formatThousandsBR(String(filter.min_price))
+          : "",
+      max_price:
+        typeof filter?.max_price === "number"
+          ? formatThousandsBR(String(filter.max_price))
+          : "",
+      neighborhoods: Array.isArray(filter?.neighborhoods)
+        ? filter?.neighborhoods.join(", ")
+        : "",
+      min_bedrooms: filter?.min_bedrooms?.toString() ?? "",
+      min_bathrooms: filter?.min_bathrooms?.toString() ?? "",
+      min_parking: filter?.min_parking?.toString() ?? "",
+      min_area_m2: filter?.min_area_m2?.toString() ?? "",
+      max_area_m2: filter?.max_area_m2?.toString() ?? "",
+      max_days_fresh: filter?.max_days_fresh?.toString() ?? "15",
+      property_types: Array.isArray(filter?.property_types)
+        ? filter?.property_types
+          .filter((item) => PROPERTY_TYPE_SET.has(item as PropertyTypeValue))
+          .join(", ")
+        : ""
+    });
+
+    setMatches(bundle.matches);
+    setMatchesHasMore(bundle.matchesHasMore);
     setMatchesPage(0);
-    setHistory([]);
+    setMatchesLoading(false);
+    setMatchesError(null);
+
+    setHistory(bundle.history);
+    setHistoryHasMore(bundle.historyHasMore);
     setHistoryPage(0);
-    setArchived([]);
+    setHistoryLoading(false);
+
+    setArchived(bundle.archived);
+    setArchivedHasMore(bundle.archivedHasMore);
     setArchivedPage(0);
-    let cancelled = false;
+    setArchivedLoading(false);
 
-    const loadClientData = async () => {
-      const filter = await fetchFilterRef.current(selectedClientId);
-      await Promise.all([
-        fetchMatchesRef.current(selectedClientId, 0, filter),
-        fetchHistoryRef.current(selectedClientId, 0, filter),
-        fetchArchivedRef.current(selectedClientId, 0, filter),
-        fetchTimelineRef.current(selectedClientId)
-      ]);
-      if (!cancelled) {
-        acknowledgeClientViewRef.current(selectedClientId);
-      }
-    };
+    setTimelineEvents(bundle.timeline);
+    setTimelineError(null);
+    setTimelineLoading(false);
+    acknowledgeClientViewRef.current(selectedClientId);
+  }, [
+    organizationId,
+    selectedClientBundleQuery.data,
+    selectedClientBundleQuery.dataUpdatedAt,
+    selectedClientId
+  ]);
 
-    loadClientData();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [organizationId, selectedClientId]);
+  useEffect(() => {
+    if (!organizationId || !selectedClientId || !selectedClientBundleQuery.error) {
+      return;
+    }
+    const message =
+      selectedClientBundleQuery.error instanceof Error
+        ? selectedClientBundleQuery.error.message
+        : "Erro ao carregar dados do cliente.";
+    setFilterError(message);
+    setMatchesError(message);
+    setTimelineError(message);
+    setMatchesLoading(false);
+    setHistoryLoading(false);
+    setArchivedLoading(false);
+    setTimelineLoading(false);
+  }, [organizationId, selectedClientBundleQuery.error, selectedClientId]);
 
   useEffect(() => {
     if (!organizationId) return;
@@ -1926,6 +2437,14 @@ export default function CrmPage() {
     setClientSaving(true);
     setClientError(null);
     const trimmedName = clientDraft.name.trim();
+    const nextActionDate = clientDraft.next_action_at || null;
+    const nextActionAt = fromDateInputValueToIso(clientDraft.next_action_at);
+    const normalizedDraftStatus = normalizePipelineStatus(clientDraft.status_pipeline);
+    const chaseDueAt =
+      normalizedDraftStatus === "contato_feito" ||
+        normalizedDraftStatus === "aguardando_retorno"
+        ? nextActionAt
+        : null;
 
     if (!trimmedName) {
       setClientError("Nome é obrigatório.");
@@ -1954,26 +2473,57 @@ export default function CrmPage() {
             email: clientDraft.email?.trim() || null,
             phone: clientDraft.phone?.trim() || null
           },
-          data_retorno: clientDraft.data_retorno || null,
+          data_retorno: nextActionDate,
           descricao_contexto: clientDraft.descricao_contexto || null,
-          status_pipeline: clientDraft.status_pipeline || null
+          status_pipeline: clientDraft.status_pipeline || null,
+          next_followup_at: nextActionAt,
+          next_action_at: nextActionAt,
+          chase_due_at: chaseDueAt
         })
         .select(
-          "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, created_at"
+          "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, next_action_at, next_followup_at, chase_due_at, last_contact_at, last_reply_at, created_at"
         )
         .single();
 
-      if (error) {
-        setClientError(error.message);
-        console.error("Erro ao criar client:", error);
+      let createData = data as Client | null;
+      let createError = error;
+      if (createError && isMissingColumnError(createError.message)) {
+        const fallback = await supabase
+          .from("clients")
+          .insert({
+            org_id: organizationId,
+            owner_user_id: ownerUserId,
+            user_id: ownerUserId,
+            name: trimmedName,
+            contact_info: {
+              email: clientDraft.email?.trim() || null,
+              phone: clientDraft.phone?.trim() || null
+            },
+            data_retorno: nextActionDate,
+            descricao_contexto: clientDraft.descricao_contexto || null,
+            status_pipeline: clientDraft.status_pipeline || null,
+            next_followup_at: nextActionAt
+          })
+          .select(
+            "id, org_id, owner_user_id, user_id, name, contact_info, data_retorno, descricao_contexto, status_pipeline, next_followup_at, created_at"
+          )
+          .single();
+        createData = (fallback.data as Client | null) ?? null;
+        createError = fallback.error;
+      }
+
+      if (createError) {
+        setClientError(createError.message);
+        console.error("Erro ao criar client:", createError);
         setClientSaving(false);
         return;
       }
 
-      if (data) {
-        setSelectedClientId((data as Client).id);
+      if (createData) {
+        setSelectedClientId((createData as Client).id);
         setIsCreatingClient(false);
-        await fetchClients((data as Client).id);
+        await fetchClients((createData as Client).id);
+        setClientFormModalOpen(false);
       }
     } else if (selectedClientId) {
       const ownerUserId = await getAuthenticatedUserId();
@@ -1996,9 +2546,12 @@ export default function CrmPage() {
             email: clientDraft.email?.trim() || null,
             phone: clientDraft.phone?.trim() || null
           },
-          data_retorno: clientDraft.data_retorno || null,
+          data_retorno: nextActionDate,
           descricao_contexto: clientDraft.descricao_contexto || null,
-          status_pipeline: clientDraft.status_pipeline || null
+          status_pipeline: clientDraft.status_pipeline || null,
+          next_followup_at: nextActionAt,
+          next_action_at: nextActionAt,
+          chase_due_at: chaseDueAt
         })
         .eq("id", selectedClientId)
         .eq("org_id", organizationId)
@@ -2013,9 +2566,10 @@ export default function CrmPage() {
               email: clientDraft.email?.trim() || null,
               phone: clientDraft.phone?.trim() || null
             },
-            data_retorno: clientDraft.data_retorno || null,
+            data_retorno: nextActionDate,
             descricao_contexto: clientDraft.descricao_contexto || null,
-            status_pipeline: clientDraft.status_pipeline || null
+            status_pipeline: clientDraft.status_pipeline || null,
+            next_followup_at: nextActionAt
           })
           .eq("id", selectedClientId)
           .eq("org_id", organizationId)
@@ -2028,6 +2582,7 @@ export default function CrmPage() {
         console.error("Erro ao atualizar client:", error);
       } else {
         await fetchClients(selectedClientId);
+        setClientFormModalOpen(false);
       }
     } else {
       setClientError("Selecione um client para editar.");
@@ -2463,12 +3018,11 @@ export default function CrmPage() {
 
   const topMatches = matches.slice(0, 3);
   const returnsTodayCount = useMemo(() => {
-    const today = new Date();
-    return clients.filter((client) => {
-      const date = parseDateSafe(client.data_retorno);
-      return date ? isSameDay(date, today) : false;
-    }).length;
-  }, [clients]);
+    const now = new Date();
+    return activeClientsSource.filter((client) => isClientDueToday(client, now)).length;
+  }, [activeClientsSource]);
+  const isCrmEmptyState =
+    !isLoadingClients && clientsSource.length === 0 && !selectedClient;
 
   if (!organizationId && !organizationLoading && !needsOrganizationChoice) {
     return (
@@ -2485,39 +3039,40 @@ export default function CrmPage() {
     <div className="min-w-0 space-y-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
-          <h2 className="text-2xl font-semibold">CRM</h2>
+          <h2 className="text-2xl section-title">CRM</h2>
           <p className="break-words text-sm text-zinc-400">
             Gerencie clientes, filtros e matches em tempo real.
             {organizationContext
               ? ` Organizacao ativa: ${organizationContext.organization.name}.`
               : ""}
           </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+            <span className="rounded-full border border-zinc-700 px-3 py-1 text-zinc-200">
+              Ganhos: <span className="font-semibold text-white">{userClosureCounts.won}</span>
+            </span>
+            <span className="rounded-full border border-zinc-700 px-3 py-1 text-zinc-200">
+              Perdas: <span className="font-semibold text-white">{userClosureCounts.lost}</span>
+            </span>
+          </div>
         </div>
       </div>
 
       <div className="grid min-w-0 gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-        <Card className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-              Clientes
-            </p>
+        <Card className="panel space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                Clientes
+              </p>
+            </div>
             <Button
+              type="button"
               variant="secondary"
-              onClick={() => {
-                setIsCreatingClient(true);
-                setSelectedClientId(null);
-                setClientError(null);
-                setClientDraft({
-                  name: "",
-                  email: "",
-                  phone: "",
-                  data_retorno: "",
-                  descricao_contexto: "",
-                  status_pipeline: PIPELINE_STEPS[0].value
-                });
-              }}
+              className="w-full"
+              onClick={openCreateClientForm}
+              disabled={isResultOverlayVisible}
             >
-              Novo
+              Criar cliente
             </Button>
           </div>
           {clientError ? (
@@ -2535,12 +3090,29 @@ export default function CrmPage() {
             <span className="text-white">{returnsTodayCount}</span> retornos
             previstos para hoje
           </p>
+          {requestedDueFilter ? (
+            <p className="rounded-lg accent-alert px-3 py-2 text-xs text-zinc-200">
+              Filtro ativo:{" "}
+              <span className="font-semibold text-white">
+                {requestedDueFilter === "today"
+                  ? "retornos de hoje"
+                  : "retornos atrasados"}
+              </span>
+            </p>
+          ) : null}
           <div className="space-y-2">
-            {clients.length === 0 ? (
-              <p className="text-sm text-zinc-500">Nenhum client ainda.</p>
+            {isLoadingClients && visibleClients.length === 0 ? (
+              <SkeletonList />
+            ) : visibleClients.length === 0 ? (
+              <p className="text-sm text-zinc-500">
+                {requestedDueFilter
+                  ? "Nenhum cliente neste filtro."
+                  : "Nenhum client ainda."}
+              </p>
             ) : (
-              clients.map((client) => {
+              visibleClients.map((client) => {
                 const alertCount = clientAlerts[client.id] ?? 0;
+                const stageRows = getStageDateRows(client);
                 return (
                   <button
                     key={client.id}
@@ -2550,9 +3122,9 @@ export default function CrmPage() {
                       setSelectedClientId(client.id);
                       resetDraftFromClient(client);
                     }}
-                    className={`w-full rounded-lg border px-4 py-3 text-left text-sm transition ${selectedClientId === client.id && !isCreatingClient
-                      ? "border-white bg-white text-black"
-                      : "border-zinc-800 text-zinc-300 hover:bg-white/10"
+                    className={`w-full rounded-lg border px-4 py-3 text-left text-sm transition focus-visible:outline-none ${selectedClientId === client.id && !isCreatingClient
+                      ? "is-active-fixed bg-surface-lifted text-white"
+                      : "border-transparent bg-surface text-zinc-400 hover:text-zinc-100 hover:bg-surface-lifted"
                       }`}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -2563,6 +3135,16 @@ export default function CrmPage() {
                             client.contact_info?.phone ||
                             "Sem contato"}
                         </p>
+                        <p className="mt-1 text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                          {getStatusLabel(client.status_pipeline)}
+                        </p>
+                        <div className="mt-1 space-y-0.5">
+                          {stageRows.map((row) => (
+                            <p key={`${client.id}-${row.label}`} className="text-[11px] text-zinc-500">
+                              {row.label}: {row.value}
+                            </p>
+                          ))}
+                        </div>
                       </div>
                       {alertCount > 0 ? (
                         <span className="relative flex h-2.5 w-2.5 items-center justify-center">
@@ -2579,15 +3161,13 @@ export default function CrmPage() {
         </Card>
 
         <div className="min-w-0 space-y-6">
-          <Card className="space-y-4">
+          <Card className="panel space-y-4">
             <div>
               <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                {isCreatingClient ? "Novo client" : "Detalhes do client"}
+                Detalhes do cliente
               </p>
               <h3 className="mt-2 text-lg font-semibold">
-                {isCreatingClient
-                  ? "Cadastrar client"
-                  : selectedClient?.name || "Selecione um client"}
+                {selectedClient?.name || (isCrmEmptyState ? "Nenhum cliente cadastrado" : "Selecione um cliente")}
               </h3>
             </div>
 
@@ -2616,6 +3196,19 @@ export default function CrmPage() {
                     ) : null}
                   </div>
                 </div>
+
+                {!isCreatingClient && selectedClient ? (
+                  <div className="mb-3 grid gap-2 rounded-xl border border-zinc-800 bg-black/60 px-3 py-2 text-xs text-zinc-400 md:grid-cols-2">
+                    {getStageDateRows(selectedClient).map((row) => (
+                      <p key={`selected-${row.label}`}>
+                        <span className="text-zinc-500">{row.label}:</span> {row.value}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+                <p className="mb-3 text-[11px] text-zinc-500">
+                  {PIPELINE_STATUS_HELP[displayPipelineStatus]}
+                </p>
 
                 <div className="space-y-3 lg:hidden">
                   <div className="flex items-start justify-between gap-3 rounded-xl border border-zinc-800 bg-black/60 p-3">
@@ -2699,7 +3292,7 @@ export default function CrmPage() {
                     </>
                   ) : null}
 
-                  <div className="relative z-10 grid grid-cols-6 gap-2">
+                  <div className="relative z-10 grid grid-cols-7 gap-2">
                     {PIPELINE_STEPS.map((step) => {
                       const stepIndex = PIPELINE_INDEX_BY_STATUS[step.value];
                       const isCompleted = stepIndex < displayIndex;
@@ -2719,11 +3312,11 @@ export default function CrmPage() {
                             !selectedClientId
                           }
                           aria-current={isActive ? "step" : undefined}
-                          className={`min-w-0 rounded-xl border px-2 py-2 text-center text-[10px] font-semibold leading-tight transition ${isActive
-                            ? "border-white bg-white text-black ring-1 ring-white/70 shadow-[0_0_0_1px_rgba(255,255,255,0.2)]"
+                          className={`min-h-[58px] min-w-0 rounded-xl border px-2.5 py-2 text-center text-[10px] font-semibold leading-tight transition accent-focus focus-visible:outline-none ${isActive
+                            ? "accent-fill accent-sheen text-zinc-50"
                             : isCompleted
-                              ? "border-white/90 bg-white text-black shadow-[0_0_0_1px_rgba(255,255,255,0.12)]"
-                              : "border-zinc-700 bg-black/70 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                              ? "accent-fill-subtle text-sky-100"
+                              : "accent-outline text-zinc-300 hover:text-zinc-100"
                             }`}
                         >
                           {step.label}
@@ -2732,101 +3325,88 @@ export default function CrmPage() {
                     })}
                   </div>
                 </div>
-
-                <p className="mt-2 text-[11px] text-zinc-500">
-                  A animação do pipeline só roda depois da confirmação salva com sucesso.
-                </p>
               </div>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-3">
-              <Input
-                placeholder="Nome"
-                value={clientDraft.name}
-                onChange={(event) =>
-                  setClientDraft((prev) => ({
-                    ...prev,
-                    name: event.target.value
-                  }))
-                }
-              />
-              <Input
-                placeholder="Email"
-                type="email"
-                value={clientDraft.email}
-                onChange={(event) =>
-                  setClientDraft((prev) => ({
-                    ...prev,
-                    email: event.target.value
-                  }))
-                }
-              />
-              <Input
-                placeholder="Telefone"
-                value={clientDraft.phone}
-                onChange={(event) =>
-                  setClientDraft((prev) => ({
-                    ...prev,
-                    phone: event.target.value
-                  }))
-                }
-              />
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-2">
-              <Input
-                type="date"
-                placeholder="Data retorno"
-                value={clientDraft.data_retorno}
-                onChange={(event) =>
-                  setClientDraft((prev) => ({
-                    ...prev,
-                    data_retorno: event.target.value
-                  }))
-                }
-              />
-              <textarea
-                placeholder="Descrição / contexto do cliente"
-                value={clientDraft.descricao_contexto}
-                onChange={(event) =>
-                  setClientDraft((prev) => ({
-                    ...prev,
-                    descricao_contexto: event.target.value
-                  }))
-                }
-                className="min-h-[44px] rounded-lg border border-zinc-800 bg-black/60 px-4 py-2 text-sm text-white placeholder:text-zinc-500 focus:border-white/60 focus:outline-none"
-              />
-            </div>
-
-            {clientError ? (
-              <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                {clientError}
-              </p>
-            ) : null}
-
-            <div className="flex items-center gap-2">
-              <Button
-                onClick={handleSaveClient}
-                disabled={clientSaving}
-                variant="secondary"
-              >
-                {clientSaving ? "Salvando..." : "Salvar client"}
-              </Button>
-              {!isCreatingClient && selectedClient ? (
+            {isCrmEmptyState ? (
+              <div className="rounded-xl border border-zinc-800 bg-black/40 p-4">
+                <p className="text-sm text-zinc-300">
+                  Você ainda não possui clientes cadastrados no CRM.
+                </p>
                 <Button
                   type="button"
-                  variant="ghost"
-                  onClick={() => resetDraftFromClient(selectedClient)}
+                  variant="secondary"
+                  className="mt-3 w-full sm:w-auto"
+                  onClick={openCreateClientForm}
+                  disabled={isResultOverlayVisible}
                 >
-                  Descartar
+                  Criar cliente
                 </Button>
-              ) : null}
-              {!isCreatingClient && selectedClient ? (
-                <Button type="button" variant="ghost" onClick={handleRemoveClient}>
-                  Remover Cliente
-                </Button>
-              ) : null}
-            </div>
+              </div>
+            ) : !selectedClient ? (
+              <div className="rounded-xl border border-zinc-800 bg-black/40 p-4">
+                <p className="text-sm text-zinc-300">
+                  Selecione um cliente na lista para visualizar os detalhes.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Nome</p>
+                    <p className="mt-1 text-sm text-zinc-100">{selectedClient.name || "—"}</p>
+                  </div>
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Email</p>
+                    <p className="mt-1 text-sm text-zinc-100">
+                      {selectedClient.contact_info?.email || "—"}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Telefone</p>
+                    <p className="mt-1 text-sm text-zinc-100">
+                      {selectedClient.contact_info?.phone || "—"}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Próxima ação</p>
+                    <p className="mt-1 text-sm text-zinc-100">
+                      {formatDateTimeDisplay(resolveClientNextActionAt(selectedClient))}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2 md:col-span-2">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Descrição / contexto</p>
+                    <p className="mt-1 text-sm text-zinc-100">
+                      {selectedClient.descricao_contexto || "—"}
+                    </p>
+                  </div>
+                </div>
+
+                {clientError ? (
+                  <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                    {clientError}
+                  </p>
+                ) : null}
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={openEditClientForm}
+                    disabled={isResultOverlayVisible}
+                  >
+                    Editar
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                    onClick={handleRemoveClient}
+                  >
+                    Remover Cliente
+                  </Button>
+                </div>
+              </>
+            )}
           </Card>
 
           {selectedClientId ? (
@@ -2888,17 +3468,35 @@ export default function CrmPage() {
 
                       <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-400">
                         {payload?.next_action ? (
-                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
+                          <span className="accent-fill-subtle rounded-full px-2 py-1">
                             Próxima ação: {getNextActionLabel(payload.next_action)}
                           </span>
                         ) : null}
-                        {payload?.next_followup_at ? (
-                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
-                            Follow-up: {formatDateTimeDisplay(payload.next_followup_at)}
+                        {payload?.next_action_at || payload?.next_followup_at ? (
+                          <span className="accent-fill-subtle rounded-full px-2 py-1">
+                            Próxima ação em:{" "}
+                            {formatDateTimeDisplay(
+                              payload.next_action_at ?? payload.next_followup_at
+                            )}
+                          </span>
+                        ) : null}
+                        {payload?.chase_due_at ? (
+                          <span className="accent-fill-subtle rounded-full px-2 py-1">
+                            Cobrar em: {formatDateTimeDisplay(payload.chase_due_at)}
+                          </span>
+                        ) : null}
+                        {payload?.last_contact_at ? (
+                          <span className="accent-fill-subtle rounded-full px-2 py-1">
+                            Contato em: {formatDateTimeDisplay(payload.last_contact_at)}
+                          </span>
+                        ) : null}
+                        {payload?.last_reply_at ? (
+                          <span className="accent-fill-subtle rounded-full px-2 py-1">
+                            Respondeu em: {formatDateTimeDisplay(payload.last_reply_at)}
                           </span>
                         ) : null}
                         {payload?.closed_outcome ? (
-                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
+                          <span className="accent-fill-subtle rounded-full px-2 py-1">
                             Resultado:{" "}
                             {payload.closed_outcome === "won"
                               ? "Ganho"
@@ -2906,7 +3504,7 @@ export default function CrmPage() {
                           </span>
                         ) : null}
                         {payload?.lost_reason ? (
-                          <span className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-1">
+                          <span className="accent-fill-subtle rounded-full px-2 py-1">
                             Motivo perda: {getLostReasonLabel(payload.lost_reason)}
                           </span>
                         ) : null}
@@ -3001,13 +3599,13 @@ export default function CrmPage() {
                     {selectedNeighborhoods.map((item) => (
                       <span
                         key={item}
-                        className="inline-flex items-center gap-2 rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-200"
+                        className="inline-flex items-center gap-2 rounded-full accent-badge px-3 py-1 text-xs text-zinc-200"
                       >
                         {item}
                         <button
                           type="button"
                           onClick={() => removeNeighborhood(item)}
-                          className="rounded-full p-0.5 text-zinc-400 transition hover:bg-white/10 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                          className="rim-core rim-secondary inline-flex h-5 w-5 items-center justify-center rounded-full p-0 text-zinc-300 transition hover:text-zinc-100 focus-visible:outline-none [--rim-size:1.5px]"
                           aria-label={`Remover bairro ${item}`}
                         >
                           ×
@@ -3098,7 +3696,7 @@ export default function CrmPage() {
                       max_days_fresh: event.target.value
                     }))
                   }
-                  className="w-full appearance-none rounded-xl border border-zinc-700/70 bg-zinc-950/50 px-3.5 py-2.5 text-sm text-zinc-100 transition-colors hover:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/20"
+                  className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
                 >
                   {FRESHNESS_OPTIONS.map((option) => (
                     <option key={option.label} value={option.value}>
@@ -3122,11 +3720,10 @@ export default function CrmPage() {
                         type="button"
                         aria-pressed={selected}
                         onClick={() => togglePropertyType(option.value)}
-                        className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 ${
-                          selected
-                            ? "border-zinc-200 bg-zinc-100 text-zinc-900"
-                            : "border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100"
-                        }`}
+                        className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] transition accent-focus focus-visible:outline-none ${selected
+                          ? "accent-fill accent-sheen text-zinc-50"
+                          : "accent-outline text-zinc-300 hover:text-zinc-100"
+                          }`}
                       >
                         {option.label}
                       </button>
@@ -3138,7 +3735,6 @@ export default function CrmPage() {
               <Button
                 onClick={handleSaveFilters}
                 disabled={filterSaving}
-                variant="secondary"
               >
                 {filterSaving ? "Salvando..." : "Salvar filtros"}
               </Button>
@@ -3301,6 +3897,7 @@ export default function CrmPage() {
                               </Button>
                               <Button
                                 variant="ghost"
+                                className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
                                 onClick={() =>
                                   handleMatchAction(match, "delete")
                                 }
@@ -3569,408 +4166,568 @@ export default function CrmPage() {
         </div>
       </div>
 
-      {isClientSide
-        ? createPortal(
-          <>
-            <AnimatePresence>
-              {mobileStagePickerOpen ? (
-                <motion.div
-                  className="fixed inset-0 z-[150] flex items-end justify-center lg:hidden"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                >
-                  <button
-                    type="button"
-                    aria-label="Fechar seletor de etapa"
-                    className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-                    onClick={() => setMobileStagePickerOpen(false)}
-                  />
+      {
+        isClientSide
+          ? createPortal(
+            <>
+              <AnimatePresence>
+                {mobileStagePickerOpen ? (
                   <motion.div
-                    className="relative z-10 w-full max-h-[85vh] overflow-y-auto rounded-t-2xl border border-zinc-800 bg-zinc-950 p-4 pb-6 shadow-2xl"
-                    initial={{ y: 36, opacity: 0 }}
-                    animate={{ y: 0, opacity: 1 }}
-                    exit={{ y: 36, opacity: 0 }}
-                    transition={{ type: "spring", stiffness: 170, damping: 24 }}
-                    onClick={(event) => event.stopPropagation()}
+                    className="fixed inset-0 z-[150] flex items-end justify-center lg:hidden"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
                   >
-                    <div className="mx-auto mb-3 h-1.5 w-14 rounded-full bg-zinc-700" />
-                    <div className="mb-3">
-                      <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                        Alterar etapa
-                      </p>
-                      <h3 className="mt-2 text-lg font-semibold">
-                        Escolha a nova etapa do pipeline
-                      </h3>
-                    </div>
+                    <button
+                      type="button"
+                      aria-label="Fechar seletor de etapa"
+                      className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+                      onClick={() => setMobileStagePickerOpen(false)}
+                    />
+                    <motion.div
+                      className="relative z-10 w-full max-h-[85vh] overflow-y-auto rounded-t-2xl border border-zinc-800 bg-zinc-950 p-4 pb-6 shadow-2xl"
+                      initial={{ y: 36, opacity: 0 }}
+                      animate={{ y: 0, opacity: 1 }}
+                      exit={{ y: 36, opacity: 0 }}
+                      transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <div className="mx-auto mb-3 h-1.5 w-14 rounded-full bg-zinc-700" />
+                      <div className="mb-3">
+                        <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                          Alterar etapa
+                        </p>
+                        <h3 className="mt-2 text-lg font-semibold">
+                          Escolha a nova etapa do pipeline
+                        </h3>
+                      </div>
 
-                    <div className="space-y-2">
-                      {PIPELINE_STEPS.map((step, index) => {
-                        const isCompleted = index < displayIndex;
-                        const isActive = index === displayIndex;
-                        return (
-                          <button
-                            key={step.value}
-                            type="button"
-                            disabled={statusModalSaving || isPipelineAnimating}
-                            onClick={() => handlePipelineChange(step.value)}
-                            className={`flex w-full items-start gap-3 rounded-xl border px-3 py-3 text-left transition ${isActive
-                              ? "border-white bg-white text-black"
-                              : isCompleted
-                                ? "border-white/80 bg-white/90 text-black"
-                                : "border-zinc-700 bg-black/70 text-zinc-200"
-                              }`}
-                          >
-                            <span
-                              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold ${isActive || isCompleted
-                                ? "border-black/50 bg-black/10 text-black"
-                                : "border-zinc-500 text-zinc-300"
+                      <div className="space-y-2">
+                        {PIPELINE_STEPS.map((step, index) => {
+                          const isCompleted = index < displayIndex;
+                          const isActive = index === displayIndex;
+                          return (
+                            <button
+                              key={step.value}
+                              type="button"
+                              disabled={statusModalSaving || isPipelineAnimating}
+                              onClick={() => handlePipelineChange(step.value)}
+                              className={`flex w-full items-start gap-3 rounded-xl border px-3 py-3 text-left transition accent-focus focus-visible:outline-none ${isActive
+                                ? "accent-fill accent-sheen text-zinc-50"
+                                : isCompleted
+                                  ? "accent-fill-subtle text-sky-100"
+                                  : "accent-outline text-zinc-200"
                                 }`}
                             >
-                              {isCompleted ? "✓" : index + 1}
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-sm font-semibold">
-                                {step.label}
-                              </span>
                               <span
-                                className={`mt-0.5 block text-[11px] ${isActive || isCompleted
-                                  ? "text-black/70"
-                                  : "text-zinc-500"
+                                className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold ${isActive || isCompleted
+                                  ? "border-white/35 bg-black/30 text-zinc-100"
+                                  : "border-zinc-500 text-zinc-300"
                                   }`}
                               >
-                                {isActive
-                                  ? "Etapa atual (registrar atividade também disponível)"
-                                  : isCompleted
-                                    ? "Etapa já concluída"
-                                    : "Etapa futura"}
+                                {isCompleted ? "✓" : index + 1}
                               </span>
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                              <span className="min-w-0">
+                                <span className="block text-sm font-semibold">
+                                  {step.label}
+                                </span>
+                                <span
+                                  className={`mt-0.5 block text-[11px] ${isActive || isCompleted
+                                    ? "text-zinc-200/80"
+                                    : "text-zinc-500"
+                                    }`}
+                                >
+                                  {isActive
+                                    ? "Etapa atual. "
+                                    : isCompleted
+                                      ? "Etapa já concluída. "
+                                      : ""}
+                                  {PIPELINE_STATUS_HELP[step.value]}
+                                </span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
 
-                    <div className="mt-4 flex justify-end">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        onClick={() => setMobileStagePickerOpen(false)}
-                      >
-                        Fechar
-                      </Button>
-                    </div>
+                      <div className="mt-4 flex justify-end">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={() => setMobileStagePickerOpen(false)}
+                        >
+                          Fechar
+                        </Button>
+                      </div>
+                    </motion.div>
                   </motion.div>
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
+                ) : null}
+              </AnimatePresence>
 
-            <AnimatePresence>
-              {statusModalOpen ? (
-                <motion.div
-                  className="fixed inset-0 z-[160] flex items-center justify-center p-4"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                >
-                  <button
-                    type="button"
-                    aria-label="Fechar modal"
-                    className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-                    onClick={closeStatusTransitionModal}
-                  />
+              <AnimatePresence>
+                {clientFormModalOpen ? (
                   <motion.div
-                    className="relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950/95 p-5 shadow-2xl"
-                    initial={{ opacity: 0, y: 20, scale: 0.98 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 20, scale: 0.98 }}
-                    transition={{ type: "spring", stiffness: 170, damping: 24 }}
-                    onClick={(event) => event.stopPropagation()}
+                    className="fixed inset-0 z-[155] flex items-center justify-center p-4"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
                   >
-              <div className="mb-4">
-                <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                  {statusModalIsActivityOnly ? "Registrar atividade" : "Atualizar pipeline"}
-                </p>
-                <h3 className="mt-2 text-lg font-semibold">
-                  {statusModalIsActivityOnly
-                    ? `${getStatusLabel(statusModalTarget)} · Registrar atividade`
-                    : `${getStatusLabel(statusModalFrom)} → ${getStatusLabel(statusModalTarget)}`}
-                </h3>
-                <p className="mt-1 text-xs text-zinc-500">
-                  {statusModalIsActivityOnly
-                    ? "Atualize próxima ação, follow-up e notas sem mudar a etapa."
-                    : "Registre próxima ação, follow-up e detalhes da etapa."}
-                </p>
-              </div>
-
-              <div className="space-y-4">
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-xs text-zinc-500">Próxima ação</label>
-                    <select
-                      value={transitionDraft.next_action}
-                      onChange={(event) =>
-                        setTransitionDraft((prev) => ({
-                          ...prev,
-                          next_action: event.target.value as NextActionValue | ""
-                        }))
-                      }
-                      className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-white/30"
-                    >
-                      <option value="">Selecione</option>
-                      {NEXT_ACTION_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs text-zinc-500">Próximo follow-up</label>
-                    <Input
-                      type="datetime-local"
-                      value={transitionDraft.next_followup_at}
-                      disabled={transitionDraft.no_followup_date}
-                      onChange={(event) =>
-                        setTransitionDraft((prev) => ({
-                          ...prev,
-                          next_followup_at: event.target.value
-                        }))
-                      }
+                    <button
+                      type="button"
+                      aria-label="Fechar formulário de cliente"
+                      className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+                      onClick={closeClientFormModal}
                     />
-                    <label className="flex items-center gap-2 text-xs text-zinc-400">
-                      <input
-                        type="checkbox"
-                        checked={transitionDraft.no_followup_date}
-                        onChange={(event) =>
-                          setTransitionDraft((prev) => ({
-                            ...prev,
-                            no_followup_date: event.target.checked,
-                            next_followup_at: event.target.checked
-                              ? ""
-                              : prev.next_followup_at
-                          }))
-                        }
-                      />
-                      Sem data por enquanto
-                    </label>
-                  </div>
-                </div>
+                    <motion.div
+                      className="relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950/95 p-5 shadow-2xl"
+                      initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 20, scale: 0.98 }}
+                      transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <div className="mb-4">
+                        <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                          {isCreatingClient ? "Criar cliente" : "Editar cliente"}
+                        </p>
+                        <h3 className="mt-2 text-lg font-semibold">
+                          {isCreatingClient
+                            ? "Cadastrar novo cliente"
+                            : selectedClient?.name || "Editar cliente"}
+                        </h3>
+                      </div>
 
-                <div className="space-y-2">
-                  <label className="text-xs text-zinc-500">Nota curta</label>
-                  <textarea
-                    value={transitionDraft.note}
-                    onChange={(event) =>
-                      setTransitionDraft((prev) => ({
-                        ...prev,
-                        note: event.target.value
-                      }))
-                    }
-                    rows={2}
-                    placeholder="Contexto rápido da mudança"
-                    className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/30"
-                  />
-                </div>
-
-                {statusModalTarget === "visita_agendada" ? (
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
-                      Dados da visita
-                    </p>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <Input
-                        type="datetime-local"
-                        value={transitionDraft.visit_at}
-                        onChange={(event) =>
-                          setTransitionDraft((prev) => ({
-                            ...prev,
-                            visit_at: event.target.value
-                          }))
-                        }
-                      />
-                      <Input
-                        placeholder="Local/observação rápida"
-                        value={transitionDraft.visit_notes}
-                        onChange={(event) =>
-                          setTransitionDraft((prev) => ({
-                            ...prev,
-                            visit_notes: event.target.value
-                          }))
-                        }
-                      />
-                    </div>
-                  </div>
-                ) : null}
-
-                {statusModalTarget === "proposta" ? (
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
-                      Dados da proposta
-                    </p>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <Input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        placeholder="Valor da proposta"
-                        value={transitionDraft.proposal_value}
-                        onChange={(event) =>
-                          setTransitionDraft((prev) => ({
-                            ...prev,
-                            proposal_value: event.target.value
-                          }))
-                        }
-                      />
-                      <Input
-                        type="date"
-                        value={transitionDraft.proposal_valid_until}
-                        onChange={(event) =>
-                          setTransitionDraft((prev) => ({
-                            ...prev,
-                            proposal_valid_until: event.target.value
-                          }))
-                        }
-                      />
-                    </div>
-                  </div>
-                ) : null}
-
-                {statusModalTarget === "fechado" ? (
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 p-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
-                      Resultado final
-                    </p>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {CLOSED_OUTCOME_OPTIONS.map((option) => {
-                        const active = transitionDraft.closed_outcome === option.value;
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            onClick={() =>
-                              setTransitionDraft((prev) => ({
+                      <div className="space-y-4">
+                        <div className="grid gap-3 md:grid-cols-3">
+                          <Input
+                            placeholder="Nome"
+                            value={clientDraft.name}
+                            onChange={(event) =>
+                              setClientDraft((prev) => ({
                                 ...prev,
-                                closed_outcome: option.value,
-                                lost_reason:
-                                  option.value === "lost" ? prev.lost_reason : "",
-                                lost_reason_detail:
-                                  option.value === "lost" ? prev.lost_reason_detail : ""
+                                name: event.target.value
                               }))
                             }
-                            className={`rounded-full border px-3 py-1 text-xs uppercase tracking-[0.2em] transition ${active
-                              ? "border-white bg-white text-black"
-                              : "border-zinc-700 text-zinc-300 hover:text-white"
-                              }`}
-                          >
-                            {option.label}
-                          </button>
-                        );
-                      })}
-                    </div>
+                          />
+                          <Input
+                            placeholder="Email"
+                            type="email"
+                            value={clientDraft.email}
+                            onChange={(event) =>
+                              setClientDraft((prev) => ({
+                                ...prev,
+                                email: event.target.value
+                              }))
+                            }
+                          />
+                          <Input
+                            placeholder="Telefone"
+                            value={clientDraft.phone}
+                            onChange={(event) =>
+                              setClientDraft((prev) => ({
+                                ...prev,
+                                phone: event.target.value
+                              }))
+                            }
+                          />
+                        </div>
 
-                    {transitionDraft.closed_outcome === "won" ? (
-                      <div className="mt-3 grid gap-3 md:grid-cols-2">
-                        <Input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          placeholder="Valor final (opcional)"
-                          value={transitionDraft.final_value}
-                          onChange={(event) =>
-                            setTransitionDraft((prev) => ({
-                              ...prev,
-                              final_value: event.target.value
-                            }))
-                          }
-                        />
-                        <Input
-                          placeholder="Nota final (opcional)"
-                          value={transitionDraft.final_note}
-                          onChange={(event) =>
-                            setTransitionDraft((prev) => ({
-                              ...prev,
-                              final_note: event.target.value
-                            }))
-                          }
-                        />
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <Input
+                              type="date"
+                              placeholder="Próxima ação"
+                              value={clientDraft.next_action_at}
+                              onChange={(event) =>
+                                setClientDraft((prev) => ({
+                                  ...prev,
+                                  next_action_at: event.target.value
+                                }))
+                              }
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setClientDraft((prev) => ({
+                                  ...prev,
+                                  next_action_at: new Date().toISOString().slice(0, 10)
+                                }))
+                              }
+                              className="inline-flex rounded-full px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-zinc-200 transition accent-outline accent-sheen accent-focus focus-visible:outline-none hover:text-zinc-100"
+                            >
+                              Definir hoje
+                            </button>
+                          </div>
+                          <textarea
+                            placeholder="Descrição / contexto do cliente"
+                            value={clientDraft.descricao_contexto}
+                            onChange={(event) =>
+                              setClientDraft((prev) => ({
+                                ...prev,
+                                descricao_contexto: event.target.value
+                              }))
+                            }
+                            className="min-h-[44px] rounded-lg px-4 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none accent-focus accent-control"
+                          />
+                        </div>
                       </div>
-                    ) : null}
 
-                    {transitionDraft.closed_outcome === "lost" ? (
-                      <div className="mt-3 space-y-3">
-                        <select
-                          value={transitionDraft.lost_reason}
-                          onChange={(event) =>
-                            setTransitionDraft((prev) => ({
-                              ...prev,
-                              lost_reason: event.target.value as LostReasonValue | ""
-                            }))
-                          }
-                          className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-white/30"
+                      {clientError ? (
+                        <p className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                          {clientError}
+                        </p>
+                      ) : null}
+
+                      <div className="mt-5 flex items-center justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={closeClientFormModal}
+                          disabled={clientSaving}
                         >
-                          <option value="">Motivo da perda</option>
-                          {LOST_REASON_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <textarea
-                          value={transitionDraft.lost_reason_detail}
-                          onChange={(event) =>
-                            setTransitionDraft((prev) => ({
-                              ...prev,
-                              lost_reason_detail: event.target.value
-                            }))
-                          }
-                          rows={2}
-                          placeholder="Detalhe do motivo (opcional)"
-                          className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/30"
-                        />
+                          Cancelar
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={handleSaveClient}
+                          disabled={clientSaving}
+                        >
+                          {clientSaving ? "Salvando..." : "Salvar cliente"}
+                        </Button>
                       </div>
-                    ) : null}
-                  </div>
+                    </motion.div>
+                  </motion.div>
                 ) : null}
-              </div>
+              </AnimatePresence>
 
-              {statusModalError ? (
-                <p className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                  {statusModalError}
-                </p>
-              ) : null}
+              <AnimatePresence>
+                {statusModalOpen ? (
+                  <motion.div
+                    className="fixed inset-0 z-[160] flex items-center justify-center p-4"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                  >
+                    <button
+                      type="button"
+                      aria-label="Fechar modal"
+                      className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+                      onClick={closeStatusTransitionModal}
+                    />
+                    <motion.div
+                      className="relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950/95 p-5 shadow-2xl"
+                      initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 20, scale: 0.98 }}
+                      transition={{ type: "spring", stiffness: 170, damping: 24 }}
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <div className="mb-4">
+                        <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                          {statusModalIsActivityOnly ? "Registrar atividade" : "Atualizar pipeline"}
+                        </p>
+                        <h3 className="mt-2 text-lg font-semibold">
+                          {statusModalIsActivityOnly
+                            ? `${getStatusLabel(statusModalTarget)} · Registrar atividade`
+                            : `${getStatusLabel(statusModalFrom)} → ${getStatusLabel(statusModalTarget)}`}
+                        </h3>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          {statusModalIsActivityOnly
+                            ? "Atualize próxima ação, cobrança e notas sem mudar a etapa."
+                            : "Registre próxima ação, cobrança e detalhes da etapa."}
+                        </p>
+                      </div>
 
-              <div className="mt-5 flex items-center justify-end gap-2">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={closeStatusTransitionModal}
-                  disabled={statusModalSaving}
-                >
-                  Cancelar
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={handleConfirmStatusTransition}
-                  disabled={statusModalSaving}
-                >
-                  {statusModalSaving
-                    ? "Salvando..."
-                    : statusModalIsActivityOnly
-                      ? "Salvar atividade"
-                      : "Confirmar mudança"}
-                </Button>
-              </div>
-                </motion.div>
-              </motion.div>
-              ) : null}
-            </AnimatePresence>
-          </>,
-          document.body
-        )
-        : null}
-    </div>
+                      <div className="space-y-4">
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <label className="text-xs text-zinc-500">Próxima ação</label>
+                            <select
+                              value={transitionDraft.next_action}
+                              onChange={(event) =>
+                                setTransitionDraft((prev) => ({
+                                  ...prev,
+                                  next_action: event.target.value as NextActionValue | ""
+                                }))
+                              }
+                              className="w-full rounded-lg px-3 py-2 text-sm text-white focus:outline-none accent-focus accent-control"
+                            >
+                              <option value="">Selecione</option>
+                              {NEXT_ACTION_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="space-y-2">
+                            <label className="text-xs text-zinc-500">
+                              {statusModalScheduleLabel} (data/hora)
+                            </label>
+                            <Input
+                              type="datetime-local"
+                              value={transitionDraft.next_action_at}
+                              disabled={transitionDraft.no_followup_date}
+                              onChange={(event) =>
+                                setTransitionDraft((prev) => ({
+                                  ...prev,
+                                  next_action_at: event.target.value
+                                }))
+                              }
+                            />
+                            <button
+                              type="button"
+                              disabled={transitionDraft.no_followup_date}
+                              onClick={() =>
+                                setTransitionDraft((prev) => ({
+                                  ...prev,
+                                  next_action_at: toDateTimeLocalInputValue(new Date().toISOString())
+                                }))
+                              }
+                              className="inline-flex rounded-full px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-zinc-200 transition accent-outline accent-sheen accent-focus focus-visible:outline-none hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Definir agora
+                            </button>
+                            <label className="flex items-center gap-2 text-xs text-zinc-400">
+                              <input
+                                type="checkbox"
+                                checked={transitionDraft.no_followup_date}
+                                onChange={(event) =>
+                                  setTransitionDraft((prev) => ({
+                                    ...prev,
+                                    no_followup_date: event.target.checked,
+                                    next_action_at: event.target.checked
+                                      ? ""
+                                      : prev.next_action_at
+                                  }))
+                                }
+                              />
+                              Sem data por enquanto
+                            </label>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="text-xs text-zinc-500">Nota curta</label>
+                          <textarea
+                            value={transitionDraft.note}
+                            onChange={(event) =>
+                              setTransitionDraft((prev) => ({
+                                ...prev,
+                                note: event.target.value
+                              }))
+                            }
+                            rows={2}
+                            placeholder="Contexto rápido da mudança"
+                            className="w-full rounded-lg px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none accent-focus accent-control"
+                          />
+                        </div>
+
+                        {statusModalTarget === "visita_agendada" ? (
+                          <div className="rounded-xl accent-surface p-3">
+                            <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                              Dados da visita
+                            </p>
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              <Input
+                                type="datetime-local"
+                                value={transitionDraft.visit_at}
+                                onChange={(event) =>
+                                  setTransitionDraft((prev) => ({
+                                    ...prev,
+                                    visit_at: event.target.value
+                                  }))
+                                }
+                              />
+                              <Input
+                                placeholder="Local/observação rápida"
+                                value={transitionDraft.visit_notes}
+                                onChange={(event) =>
+                                  setTransitionDraft((prev) => ({
+                                    ...prev,
+                                    visit_notes: event.target.value
+                                  }))
+                                }
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {statusModalTarget === "proposta" ? (
+                          <div className="rounded-xl accent-surface p-3">
+                            <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                              Dados da proposta
+                            </p>
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              <Input
+                                type="number"
+                                min={0}
+                                step="0.01"
+                                placeholder="Valor da proposta"
+                                value={transitionDraft.proposal_value}
+                                onChange={(event) =>
+                                  setTransitionDraft((prev) => ({
+                                    ...prev,
+                                    proposal_value: event.target.value
+                                  }))
+                                }
+                              />
+                              <Input
+                                type="date"
+                                value={transitionDraft.proposal_valid_until}
+                                onChange={(event) =>
+                                  setTransitionDraft((prev) => ({
+                                    ...prev,
+                                    proposal_valid_until: event.target.value
+                                  }))
+                                }
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {statusModalTarget === "fechado" ? (
+                          <div className="rounded-xl accent-surface p-3">
+                            <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                              Resultado final
+                            </p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {CLOSED_OUTCOME_OPTIONS.map((option) => {
+                                const active = transitionDraft.closed_outcome === option.value;
+                                return (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    onClick={() =>
+                                      setTransitionDraft((prev) => ({
+                                        ...prev,
+                                        closed_outcome: option.value,
+                                        lost_reason:
+                                          option.value === "lost" ? prev.lost_reason : "",
+                                        lost_reason_detail:
+                                          option.value === "lost" ? prev.lost_reason_detail : ""
+                                      }))
+                                    }
+                                    className={`rounded-full border px-3 py-1 text-xs uppercase tracking-[0.2em] transition accent-focus focus-visible:outline-none ${active
+                                      ? "accent-fill accent-sheen text-zinc-50"
+                                      : "accent-outline text-zinc-300 hover:text-white"
+                                      }`}
+                                  >
+                                    {option.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            {transitionDraft.closed_outcome === "won" ? (
+                              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  step="0.01"
+                                  placeholder="Valor final (opcional)"
+                                  value={transitionDraft.final_value}
+                                  onChange={(event) =>
+                                    setTransitionDraft((prev) => ({
+                                      ...prev,
+                                      final_value: event.target.value
+                                    }))
+                                  }
+                                />
+                                <Input
+                                  placeholder="Nota final (opcional)"
+                                  value={transitionDraft.final_note}
+                                  onChange={(event) =>
+                                    setTransitionDraft((prev) => ({
+                                      ...prev,
+                                      final_note: event.target.value
+                                    }))
+                                  }
+                                />
+                              </div>
+                            ) : null}
+
+                            {transitionDraft.closed_outcome === "lost" ? (
+                              <div className="mt-3 space-y-3">
+                                <select
+                                  value={transitionDraft.lost_reason}
+                                  onChange={(event) =>
+                                    setTransitionDraft((prev) => ({
+                                      ...prev,
+                                      lost_reason: event.target.value as LostReasonValue | ""
+                                    }))
+                                  }
+                                  className="w-full rounded-lg px-3 py-2 text-sm text-white focus:outline-none accent-focus accent-control"
+                                >
+                                  <option value="">Motivo da perda</option>
+                                  {LOST_REASON_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                                <textarea
+                                  value={transitionDraft.lost_reason_detail}
+                                  onChange={(event) =>
+                                    setTransitionDraft((prev) => ({
+                                      ...prev,
+                                      lost_reason_detail: event.target.value
+                                    }))
+                                  }
+                                  rows={2}
+                                  placeholder="Detalhe do motivo (opcional)"
+                                  className="w-full rounded-lg px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none accent-focus accent-control"
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {statusModalError ? (
+                        <p className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                          {statusModalError}
+                        </p>
+                      ) : null}
+
+                      <div className="mt-5 flex items-center justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={closeStatusTransitionModal}
+                          disabled={statusModalSaving}
+                        >
+                          Cancelar
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={handleConfirmStatusTransition}
+                          disabled={statusModalSaving}
+                        >
+                          {statusModalSaving
+                            ? "Salvando..."
+                            : statusModalIsActivityOnly
+                              ? "Salvar atividade"
+                              : "Confirmar mudança"}
+                        </Button>
+                      </div>
+                    </motion.div>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+
+              <AnimatePresence>
+                {resultOverlayType ? (
+                  <ResultOverlay type={resultOverlayType} />
+                ) : null}
+              </AnimatePresence>
+            </>,
+            document.body
+          )
+          : null
+      }
+    </div >
   );
 }

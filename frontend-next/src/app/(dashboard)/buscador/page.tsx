@@ -61,7 +61,7 @@ const portalBadgeLabel: Record<PortalBadge, string> = {
   vivareal: "VIVAREAL",
   zap: "ZAP",
   quintoandar: "QUINTOANDAR",
-  outros: "OUTROS"
+  outros: "TODOS"
 };
 
 type RadarListing = Listing & {
@@ -901,7 +901,7 @@ export default function BuscadorPage() {
             <p className="text-[10px] uppercase tracking-[0.4em] text-zinc-500">
               Filtros
             </p>
-            <h3 className="mt-2 text-lg font-semibold">Ajuste o radar</h3>
+            <h3 className="mt-2 text-lg section-title">Ajuste o radar</h3>
             <p className="mt-2 text-xs text-zinc-500">
               Alguns anuncios podem vir sem dados completos por enquanto.
             </p>
@@ -914,7 +914,7 @@ export default function BuscadorPage() {
 
           <div className="space-y-2">
             <label className="text-xs text-zinc-500">Dias frescos</label>
-            <div className="flex rounded-full border border-zinc-800 bg-black/60 p-1">
+            <div className="flex rounded-full accent-surface p-1">
               {dayOptions.map((option) => {
                 const active = filters.maxDaysFresh === option.value;
                 return (
@@ -924,11 +924,10 @@ export default function BuscadorPage() {
                     onClick={() =>
                       setFilters({ maxDaysFresh: option.value as 7 | 15 | 30 })
                     }
-                    className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
-                      active
-                        ? "bg-white text-black"
-                        : "text-zinc-400 hover:text-white"
-                    }`}
+                    className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold transition border border-transparent hover:border-zinc-700 ${active
+                      ? "is-active-fixed"
+                      : "bg-surface text-zinc-400 hover:text-white"
+                      }`}
                     aria-pressed={active}
                   >
                     {option.label}
@@ -975,7 +974,7 @@ export default function BuscadorPage() {
                   onChange={(event) =>
                     setFilters({ portal: event.target.value || "" })
                   }
-                  className="w-full appearance-none rounded-xl border border-zinc-700/70 bg-zinc-950/50 px-3.5 py-2.5 text-sm text-zinc-100 transition-colors hover:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/20"
+                  className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
                 >
                   <option value="">Todos os portais</option>
                   {portals.map((portal) => (
@@ -1003,7 +1002,7 @@ export default function BuscadorPage() {
                         | "price_desc"
                     })
                   }
-                  className="w-full appearance-none rounded-xl border border-zinc-700/70 bg-zinc-950/50 px-3.5 py-2.5 text-sm text-zinc-100 transition-colors hover:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/20"
+                  className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
                 >
                   {sortOptions.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -1032,7 +1031,7 @@ export default function BuscadorPage() {
                       | undefined
                   })
                 }
-                className="w-full appearance-none rounded-xl border border-zinc-700/70 bg-zinc-950/50 px-3.5 py-2.5 text-sm text-zinc-100 transition-colors hover:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-white/20"
+                className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
               >
                 {propertyTypeOptions.map((option) => (
                   <option key={option.value || "all"} value={option.value}>
@@ -1166,12 +1165,12 @@ export default function BuscadorPage() {
         </Card>
 
         <div className="min-w-0 space-y-6">
-          <Card className="bg-black/60 px-4 py-3">
+          <Card className="accent-surface px-4 py-3">
             <div className="flex flex-wrap items-center gap-2 md:gap-3">
-              <span className="rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-100">
+              <span className="accent-badge rounded-full px-3 py-1 text-xs text-zinc-100">
                 Novos 2h: {new2h}
               </span>
-              <span className="rounded-full border border-zinc-700 bg-black/60 px-3 py-1 text-xs text-zinc-100">
+              <span className="accent-badge rounded-full px-3 py-1 text-xs text-zinc-100">
                 Novos 24h: {new24h}
               </span>
 
@@ -1190,13 +1189,11 @@ export default function BuscadorPage() {
                         setFilters({ portal: filterValue });
                         setPage(0);
                       }}
-                      className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-black ${
-                        isActive
-                          ? "border-emerald-500/70 bg-emerald-500/10 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)]"
-                          : "border-zinc-700 bg-zinc-900/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
-                      } ${
-                        isSelected ? "ring-1 ring-emerald-400/60" : ""
-                      }`}
+                      className={`btn btn-sm btn-led-interaction rounded-full px-3 text-[10px] font-semibold uppercase tracking-[0.3em] border border-transparent ${isActive
+                        ? "bg-surface-lifted text-white"
+                        : "btn-ghost text-zinc-500 hover:text-zinc-300"
+                        } ${isSelected ? "is-active-fixed bg-surface-lifted text-white" : ""
+                        }`}
                     >
                       {portalBadgeLabel[portal]}
                     </button>
@@ -1222,7 +1219,7 @@ export default function BuscadorPage() {
             <Card
               role="status"
               aria-live="polite"
-              className="border-emerald-500/40 bg-emerald-500/10 text-sm text-emerald-200"
+              className="accent-alert text-sm"
             >
               {autoRefreshFeedback}
             </Card>

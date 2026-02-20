@@ -45,12 +45,12 @@ function Topbar() {
 
   const seatsAvailable =
     organizationContext &&
-    organizationContext.organization.kind === "brokerage"
+      organizationContext.organization.kind === "brokerage"
       ? Math.max(
-          0,
-          organizationContext.organization.seatsTotal -
-            (organizationContext.membersUsed + organizationContext.pendingInvites)
-        )
+        0,
+        organizationContext.organization.seatsTotal -
+        (organizationContext.membersUsed + organizationContext.pendingInvites)
+      )
       : 0;
   const hasMissingInvites = isBrokerageOwner && seatsAvailable > 0;
 
@@ -139,20 +139,19 @@ function Topbar() {
           {isBrokerageOwner ? (
             <Link
               href="/onboarding/imobiliaria/convidar"
-              className={`inline-flex w-full items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold transition sm:w-auto ${
-                hasMissingInvites
-                  ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-100 hover:border-emerald-300/60 hover:bg-emerald-500/15"
-                  : "border border-zinc-700 bg-zinc-900/60 text-zinc-200 hover:border-zinc-500 hover:text-white"
-              }`}
+              className={`btn btn-sm btn-led-interaction sm:w-auto ${hasMissingInvites
+                ? "btn-solid" // solid
+                : "btn-ghost"
+                }`}
             >
               {hasMissingInvites ? (
-                <span className="rounded-full bg-emerald-400/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.15em]">
-                  Faltando convites
+                <span className="mr-2 rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] uppercase tracking-wider text-red-200">
+                  Faltando convite
                 </span>
               ) : null}
-              <span>
+              <span className="mr-2">
                 {hasMissingInvites
-                  ? `Onboarding: faltam ${seatsAvailable} convite(s)`
+                  ? `Onboarding: faltam ${seatsAvailable} convites`
                   : "Onboarding Equipe"}
               </span>
               <ChevronRight className="h-3.5 w-3.5" />
@@ -164,18 +163,17 @@ function Topbar() {
               aria-label="Abrir menu de perfil"
               aria-expanded={profileOpen}
               onClick={() => setProfileOpen((previous) => !previous)}
-              className="inline-flex h-9 items-center justify-center gap-1 rounded-full border border-zinc-800 px-2.5 text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              className="btn btn-icon btn-ghost btn-led-interaction"
             >
               <UserCircle2 className="h-5 w-5" />
               <ChevronDown
-                className={`h-3.5 w-3.5 transition-transform ${
-                  profileOpen ? "rotate-180" : ""
-                }`}
+                className={`absolute -bottom-1 -right-1 h-3 w-3 transition-transform ${profileOpen ? "rotate-180" : ""
+                  }`}
               />
             </button>
 
             {profileOpen ? (
-              <div className="absolute right-0 top-11 z-40 w-64 rounded-xl border border-zinc-800 bg-black/95 p-3 shadow-glow backdrop-blur-md">
+              <div className="absolute right-0 top-14 z-40 w-64 rounded-xl border border-zinc-800 bg-black/95 p-3 shadow-glow backdrop-blur-md">
                 <div className="space-y-1 border-b border-zinc-800 pb-3">
                   <p className="text-sm font-semibold text-zinc-100">{profileName}</p>
                   <p className="break-all text-xs text-zinc-400">{profileEmail}</p>
@@ -185,7 +183,7 @@ function Topbar() {
                     type="button"
                     onClick={handleLogout}
                     disabled={logoutLoading}
-                    className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-zinc-200 transition hover:bg-white/10 hover:text-white disabled:opacity-60"
+                    className="btn btn-sm btn-ghost w-full justify-start gap-2"
                   >
                     <LogOut className="h-4 w-4" />
                     {logoutLoading ? "Saindo..." : "Sair"}

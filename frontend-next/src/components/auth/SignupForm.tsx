@@ -206,11 +206,11 @@ export default function SignupForm({ onSwitchMode }: SignupFormProps) {
 
     return (
       <section className="mt-2 space-y-4" aria-label="Cadastro enviado">
-        <div className="space-y-3 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-4">
+        <div className="space-y-3 rounded-xl accent-card-highlight p-4">
           <h2
             ref={sentTitleRef}
             tabIndex={-1}
-            className="text-xl font-semibold text-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+            className="text-xl font-semibold text-sky-100 accent-focus focus:outline-none"
           >
             Confirme seu e-mail para ativar sua conta
           </h2>
@@ -254,7 +254,7 @@ export default function SignupForm({ onSwitchMode }: SignupFormProps) {
           <p
             role="status"
             aria-live="polite"
-            className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"
+            className="rounded-lg accent-alert px-3 py-2 text-sm"
           >
             {resendStatus}
           </p>
@@ -375,7 +375,7 @@ export default function SignupForm({ onSwitchMode }: SignupFormProps) {
 
       <button
         type="button"
-        className="w-full rounded-lg px-3 py-2 text-sm text-zinc-300 transition hover:bg-white/5 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+        className="rim-core rim-secondary w-full rounded-lg px-3 py-2 text-sm text-zinc-300 transition hover:text-white focus:outline-none"
         onClick={onSwitchMode}
         disabled={loading}
       >
