@@ -7,12 +7,14 @@ import {
   useTransform
 } from "framer-motion";
 import Image from "next/image";
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 import type { MouseEvent } from "react";
 import type { Listing } from "@/hooks/useListings";
+import { normalizeText } from "@/lib/format/text";
+import { getUnifiedPropertyLabelForListing } from "@/lib/listings/unifiedPropertyFilter";
 
-const formatCurrency = (value: number | null) => {
-  if (typeof value !== "number") return "Preço não informado";
+const formatCurrency = (value: number | null | undefined, fallback = "Preço não informado") => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return new Intl.NumberFormat("pt-BR", {
     style: "currency",
     currency: "BRL",
@@ -20,10 +22,19 @@ const formatCurrency = (value: number | null) => {
   }).format(value);
 };
 
-const formatDate = (value: string | null) => {
-  if (!value) return "Data não informada";
+const formatCompactDate = (value: string | null | undefined) => {
+  if (!value) return "Sem data";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Data inválida";
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "short"
+  }).formatToParts(date);
+  const day = parts.find((part) => part.type === "day")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  if (day && month) {
+    return `${day} ${month}`;
+  }
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
     month: "short"
@@ -34,6 +45,9 @@ type ListingCardProps = {
   listing: Listing;
   className?: string;
 };
+
+const isPositiveNumber = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value) && value > 0;
 
 export default function ListingCard({ listing, className = "" }: ListingCardProps) {
   const shouldReduceMotion = useReducedMotion();
@@ -63,6 +77,8 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
     if (rawPortal === "quintoandar") return "5andar";
     return rawPortal.toUpperCase();
   }, [listing.portal]);
+
+  const isRental = listing.deal_type === "aluguel";
   const isNew24h = useMemo(() => {
     if (!listing.first_seen_at) return false;
     const ts = new Date(listing.first_seen_at).getTime();
@@ -73,16 +89,41 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
   const fullTitle = (listing.title ?? "Imóvel sem título").trim();
   const displayTitle = useMemo(() => {
     const words = fullTitle.split(/\s+/).filter(Boolean);
-    if (words.length <= 8) return fullTitle;
-    return `${words.slice(0, 8).join(" ")}…`;
+    if (words.length <= 12) return fullTitle;
+    return `${words.slice(0, 12).join(" ")}…`;
   }, [fullTitle]);
 
   const location = useMemo(() => {
-    const neighborhood =
-      listing.neighborhood_normalized ?? listing.neighborhood ?? "";
-    const city = listing.city ?? listing.state ?? "";
-    if (city && neighborhood) return `${city} · ${neighborhood}`;
-    return city || neighborhood || "Localização não informada";
+    const neighborhood = (listing.neighborhood ?? listing.neighborhood_normalized ?? "").trim();
+    const city = (listing.city ?? "").trim();
+    const state = (listing.state ?? "").trim();
+    const cityOrState = city || state;
+
+    if (!neighborhood && !cityOrState) {
+      return "Localização não informada";
+    }
+    if (!neighborhood) {
+      return cityOrState;
+    }
+    if (!cityOrState) {
+      return neighborhood;
+    }
+
+    const normalizedNeighborhood = normalizeText(neighborhood);
+    const normalizedCity = normalizeText(cityOrState);
+
+    if (
+      normalizedNeighborhood === normalizedCity ||
+      normalizedNeighborhood.includes(normalizedCity)
+    ) {
+      return neighborhood;
+    }
+
+    if (normalizedCity.includes(normalizedNeighborhood)) {
+      return cityOrState;
+    }
+
+    return `${neighborhood}, ${cityOrState}`;
   }, [
     listing.city,
     listing.state,
@@ -90,43 +131,68 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
     listing.neighborhood_normalized
   ]);
 
-  const details = useMemo(() => {
-    const items: string[] = [];
-    if (typeof listing.bedrooms === "number") {
-      items.push(`${listing.bedrooms} quartos`);
+  const effectiveDate = listing.published_at ?? listing.first_seen_at ?? null;
+  const dateLabel = useMemo(() => formatCompactDate(effectiveDate), [effectiveDate]);
+  const propertyTypeLabel = useMemo(
+    () => getUnifiedPropertyLabelForListing(listing),
+    [listing]
+  );
+
+  const mainPrice = useMemo(() => {
+    if (isRental) {
+      return isPositiveNumber(listing.total_cost) ? listing.total_cost : listing.price;
     }
-    if (typeof listing.bathrooms === "number") {
-      items.push(`${listing.bathrooms} banh`);
-    }
-    if (typeof listing.parking === "number") {
-      items.push(`${listing.parking} vaga${listing.parking > 1 ? "s" : ""}`);
-    }
-    if (typeof listing.area_m2 === "number") {
-      items.push(`${Math.round(listing.area_m2)} m²`);
-    }
-    return items;
-  }, [listing.area_m2, listing.bathrooms, listing.bedrooms, listing.parking]);
+    return listing.price;
+  }, [isRental, listing.price, listing.total_cost]);
+
+  const mainPriceText = useMemo(
+    () => formatCurrency(mainPrice),
+    [mainPrice]
+  );
+
+  const rentalCosts = useMemo(
+    () =>
+      isRental
+        ? [
+          isPositiveNumber(listing.condo_fee)
+            ? { key: "condominio", label: "Condomínio", value: listing.condo_fee }
+            : null,
+          isPositiveNumber(listing.iptu)
+            ? { key: "iptu", label: "IPTU", value: listing.iptu }
+            : null
+        ].filter(
+          (
+            item
+          ): item is { key: string; label: "Condomínio" | "IPTU"; value: number } =>
+            item !== null
+        )
+        : [],
+    [isRental, listing.condo_fee, listing.iptu]
+  );
+
+  const details = useMemo(
+    () =>
+      [
+        isPositiveNumber(listing.bedrooms)
+          ? `${listing.bedrooms} quarto${listing.bedrooms === 1 ? "" : "s"}`
+          : null,
+        isPositiveNumber(listing.bathrooms)
+          ? `${listing.bathrooms} banh.`
+          : null,
+        isPositiveNumber(listing.parking)
+          ? `${listing.parking} vaga${listing.parking === 1 ? "" : "s"}`
+          : null,
+        isPositiveNumber(listing.area_m2)
+          ? `${Math.round(listing.area_m2)}m²`
+          : null
+      ].filter(
+        (item): item is string => item !== null
+      ),
+    [listing.area_m2, listing.bathrooms, listing.bedrooms, listing.parking]
+  );
 
   return (
     <div className="relative w-full min-w-0">
-      {isNew24h ? (
-        <>
-          <span className="sr-only">Imóvel novo nas últimas 24 horas</span>
-          <span
-            aria-hidden="true"
-            className="
-              pointer-events-none absolute -right-2 -top-2 z-30
-              flex h-6 min-w-6 items-center justify-center rounded-full px-2
-              accent-badge
-              text-[9px] font-semibold uppercase tracking-[0.08em]
-              backdrop-blur
-              sm:-right-2.5 sm:-top-2.5 sm:h-7 sm:min-w-7 sm:text-[10px]
-            "
-          >
-            Novo
-          </span>
-        </>
-      ) : null}
       <motion.div
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
@@ -135,104 +201,187 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
             ? undefined
             : { rotateX, rotateY, transformStyle: "preserve-3d" }
         }
-        className={`relative overflow-hidden rounded-2xl border border-zinc-800 bg-white/5 p-5 shadow-glow backdrop-blur-md transition-colors duration-150 focus-within:border-white/40 ${className}`.trim()}
+        className={`relative flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-white/5 p-4 shadow-glow backdrop-blur-md transition-colors duration-150 focus-within:border-white/40 sm:h-[492px] sm:p-4 ${className}`.trim()}
         whileHover={shouldReduceMotion ? undefined : { scale: 1.01 }}
         transition={{ duration: 0.15, ease: "easeOut" }}
       >
-      <div className="flex items-center justify-between gap-2 text-xs text-zinc-500">
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <span className="inline-flex min-w-0 max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-semibold tracking-[0.3em] text-zinc-300">
-            <span className="truncate">{portalLabel}</span>
-          </span>
-        </div>
-        <span className="shrink-0 whitespace-nowrap">
-          {formatDate(listing.first_seen_at)}
-        </span>
-      </div>
-
-      {listing.url ? (
-        <a
-          href={listing.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`Abrir anuncio: ${listing.title ?? "imovel"}`}
-          className="group mt-4 block cursor-pointer overflow-hidden rounded-xl border border-zinc-800 bg-black/60 transition hover:border-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
-        >
-          {listing.main_image_url ? (
-            <div className="relative h-40 w-full">
-              <Image
-                src={listing.main_image_url}
-                alt={listing.title ?? "Listing"}
-                fill
-                sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
-                className="object-cover transition duration-200 group-hover:scale-[1.01]"
-              />
-            </div>
-          ) : (
-            <div className="flex h-40 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">
-              Sem imagem
-            </div>
-          )}
-        </a>
-      ) : (
-        <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800 bg-black/60">
-          {listing.main_image_url ? (
-            <div className="relative h-40 w-full">
-              <Image
-                src={listing.main_image_url}
-                alt={listing.title ?? "Listing"}
-                fill
-                sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
-                className="object-cover"
-              />
-            </div>
-          ) : (
-            <div className="flex h-40 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600">
-              Sem imagem
-            </div>
-          )}
-        </div>
-      )}
-
-      <div className="mt-4">
-        <p className="text-base font-semibold" title={fullTitle}>
-          {displayTitle}
-        </p>
-        <p className="mt-2 text-xl font-semibold">
-          {formatCurrency(listing.price)}
-        </p>
-        <p className="mt-2 text-sm text-zinc-400">{location}</p>
-      </div>
-
-      {details.length > 0 ? (
-        <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-400">
-          {details.map((item) => (
-            <span
-              key={item}
-              className="rounded-full border border-zinc-800 bg-black/60 px-3 py-1"
-            >
-              {item}
-            </span>
-          ))}
-        </div>
-      ) : (
-        <p className="mt-3 text-xs text-zinc-500">Detalhes não informados.</p>
-      )}
-
-      <div className="mt-4 flex items-center justify-between text-xs text-zinc-500">
         {listing.url ? (
           <a
             href={listing.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="underline underline-offset-4"
+            aria-label={`Abrir anuncio: ${listing.title ?? "imovel"}`}
+            className="group block cursor-pointer overflow-hidden rounded-xl border border-zinc-800 bg-black/60 transition hover:border-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
           >
-            Abrir anúncio
+            {listing.main_image_url ? (
+              <div className="relative h-44 w-full sm:h-48">
+                {isNew24h ? (
+                  <>
+                    <span className="sr-only">Imóvel novo nas últimas 24 horas</span>
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-2 top-2 z-10 inline-flex items-center rounded-full border border-emerald-400/25 bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-200 backdrop-blur"
+                    >
+                      NOVO
+                    </span>
+                  </>
+                ) : null}
+                <Image
+                  src={listing.main_image_url}
+                  alt={listing.title ?? "Listing"}
+                  fill
+                  sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
+                  className="object-cover transition duration-200 group-hover:scale-[1.01]"
+                />
+              </div>
+            ) : (
+              <div className="relative flex h-44 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600 sm:h-48">
+                {isNew24h ? (
+                  <>
+                    <span className="sr-only">Imóvel novo nas últimas 24 horas</span>
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-2 top-2 z-10 inline-flex items-center rounded-full border border-emerald-400/25 bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-200 backdrop-blur"
+                    >
+                      NOVO
+                    </span>
+                  </>
+                ) : null}
+                Sem imagem
+              </div>
+            )}
           </a>
         ) : (
-          <span>Sem link</span>
+          <div className="overflow-hidden rounded-xl border border-zinc-800 bg-black/60">
+            {listing.main_image_url ? (
+              <div className="relative h-44 w-full sm:h-48">
+                {isNew24h ? (
+                  <>
+                    <span className="sr-only">Imóvel novo nas últimas 24 horas</span>
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-2 top-2 z-10 inline-flex items-center rounded-full border border-emerald-400/25 bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-200 backdrop-blur"
+                    >
+                      NOVO
+                    </span>
+                  </>
+                ) : null}
+                <Image
+                  src={listing.main_image_url}
+                  alt={listing.title ?? "Listing"}
+                  fill
+                  sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
+                  className="object-cover"
+                />
+              </div>
+            ) : (
+              <div className="relative flex h-44 items-center justify-center text-xs uppercase tracking-[0.35em] text-zinc-600 sm:h-48">
+                {isNew24h ? (
+                  <>
+                    <span className="sr-only">Imóvel novo nas últimas 24 horas</span>
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-2 top-2 z-10 inline-flex items-center rounded-full border border-emerald-400/25 bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-200 backdrop-blur"
+                    >
+                      NOVO
+                    </span>
+                  </>
+                ) : null}
+                Sem imagem
+              </div>
+            )}
+          </div>
         )}
-      </div>
+
+        <div className="mt-4 flex min-h-0 flex-1 flex-col">
+          <p
+            className="min-h-[40px] text-sm font-semibold leading-snug text-zinc-100 sm:min-h-[42px] sm:text-[15px]"
+            title={fullTitle}
+            style={{
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden"
+            }}
+          >
+            {displayTitle}
+          </p>
+          <p className="mt-2.5 text-lg font-semibold leading-none text-zinc-100 sm:text-xl">
+            {mainPriceText}
+            {isRental ? (
+              <span className="ml-1 text-xs font-medium uppercase tracking-[0.08em] text-zinc-400">
+                /mês
+              </span>
+            ) : null}
+          </p>
+          {isRental && rentalCosts.length > 0 ? (
+            <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-zinc-400">
+              {rentalCosts.map((item, index) => (
+                <Fragment key={item.key}>
+                  {index > 0 ? (
+                    <span aria-hidden="true" className="text-zinc-600">
+                      |
+                    </span>
+                  ) : null}
+                  <span>
+                    <span className="text-zinc-500">{item.label}</span>{" "}
+                    <span className="text-zinc-300">{formatCurrency(item.value, "—")}</span>
+                  </span>
+                </Fragment>
+              ))}
+            </div>
+          ) : null}
+          {details.length > 0 ? (
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[15px] leading-5 text-zinc-300">
+              {details.map((item, index) => (
+                <Fragment key={`${listing.id}-${item}`}>
+                  {index > 0 ? (
+                    <span aria-hidden="true" className="text-zinc-600">
+                      |
+                    </span>
+                  ) : null}
+                  <span>{item}</span>
+                </Fragment>
+              ))}
+            </div>
+          ) : null}
+          <div className="mt-2.5 min-h-[20px]">
+            <p className="truncate text-sm text-zinc-400" title={location}>
+              {location}
+            </p>
+          </div>
+          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-zinc-800 bg-black/30 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-zinc-300">
+              {propertyTypeLabel}
+            </span>
+          </div>
+
+          <div className="mt-auto pt-3">
+            <div className="border-t border-zinc-800 pt-2.5">
+              <div className="flex min-w-0 items-center justify-between gap-3 text-xs text-zinc-500">
+                <span className="truncate font-medium uppercase tracking-[0.12em] text-zinc-400">
+                  {portalLabel}
+                </span>
+                <span className="shrink-0 whitespace-nowrap text-sm font-semibold">{dateLabel}</span>
+              </div>
+            </div>
+
+            <div className="mt-2.5 flex items-center justify-between text-xs text-zinc-500">
+              {listing.url ? (
+                <a
+                  href={listing.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline underline-offset-4"
+                >
+                  Abrir anúncio
+                </a>
+              ) : (
+                <span>Sem link</span>
+              )}
+            </div>
+          </div>
+        </div>
       </motion.div>
     </div>
   );

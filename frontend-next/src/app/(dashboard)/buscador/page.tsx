@@ -7,10 +7,16 @@ import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import SkeletonList from "@/components/ui/SkeletonList";
 import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
+import PropertyCategoryMultiSelect from "@/components/filters/PropertyCategoryMultiSelect";
 import { useListings, type Listing } from "@/hooks/useListings";
 import { useOrganizationContext } from "@/lib/auth/useOrganizationContext";
 import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
 import { normalizeText } from "@/lib/format/text";
+import {
+  buildUnifiedPropertySupabaseOrFilter,
+  matchesUnifiedPropertyFilter,
+  normalizeUnifiedPropertyCategories
+} from "@/lib/listings/unifiedPropertyFilter";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 const LazyRadarListingsGrid = dynamic(
@@ -40,12 +46,9 @@ const sortOptions = [
   { label: "Preco: maior -> menor", value: "price_desc" }
 ] as const;
 
-const propertyTypeOptions = [
-  { value: "", label: "Todos os tipos" },
-  { value: "apartment", label: "apartment" },
-  { value: "house", label: "house" },
-  { value: "other", label: "other" },
-  { value: "land", label: "land" },
+const dealTypeOptions = [
+  { label: "Venda", value: "venda" },
+  { label: "Aluguel", value: "aluguel" }
 ] as const;
 
 const portalBadges = ["vivareal", "zap", "quintoandar", "outros"] as const;
@@ -136,14 +139,18 @@ const parseNumberInput = (value: string) => {
 const matchesMinOrZero = (value: number | null | undefined, min?: number) => {
   const minValue = parseMinFilter(min);
   if (minValue === null) return true;
-  if (typeof value !== "number" || !Number.isFinite(value)) return true;
-  return value === 0 || value >= minValue;
+  if (typeof value !== "number" || !Number.isFinite(value)) return false;
+  return value >= minValue;
 };
+
+const getListingComparablePrice = (
+  listing: Pick<RadarListing, "price" | "total_cost">,
+  dealType: "venda" | "aluguel"
+) => (dealType === "aluguel" ? listing.total_cost : listing.price);
 
 export default function BuscadorPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const {
-    context: organizationContext,
     organizationId,
     loading: organizationLoading,
     needsOrganizationChoice,
@@ -170,6 +177,8 @@ export default function BuscadorPage() {
 
   const [minPriceInput, setMinPriceInput] = useState("");
   const [maxPriceInput, setMaxPriceInput] = useState("");
+  const [minRentInput, setMinRentInput] = useState("");
+  const [maxRentInput, setMaxRentInput] = useState("");
   const [neighborhoodQuery, setNeighborhoodQuery] = useState("");
 
   const [displayListings, setDisplayListings] = useState<Listing[]>([]);
@@ -203,6 +212,13 @@ export default function BuscadorPage() {
     filters.neighborhood_normalized ?? "",
     400
   );
+  const activeDealType = filters.dealType || "venda";
+  const isRentalDealType = activeDealType === "aluguel";
+  const priceFilterLabel = isRentalDealType ? "Custo total" : "Preco";
+  const selectedUnifiedPropertyTypes = useMemo(
+    () => normalizeUnifiedPropertyCategories(filters.propertyTypes),
+    [filters.propertyTypes]
+  );
   const isGeneralListMode = useMemo(() => {
     const neighborhoodFilter = (filters.neighborhood_normalized ?? "").trim();
     const portalFilter = (filters.portal ?? "").trim();
@@ -214,23 +230,31 @@ export default function BuscadorPage() {
       !neighborhoodFilter &&
       typeof filters.minPrice !== "number" &&
       typeof filters.maxPrice !== "number" &&
+      typeof filters.minRent !== "number" &&
+      typeof filters.maxRent !== "number" &&
       typeof filters.minBedrooms !== "number" &&
       typeof filters.minBathrooms !== "number" &&
       typeof filters.minParking !== "number" &&
       typeof filters.minAreaM2 !== "number" &&
-      !filters.propertyType
+      typeof filters.maxAreaM2 !== "number" &&
+      normalizeUnifiedPropertyCategories(filters.propertyTypes).length === 0 &&
+      filters.dealType === "venda"
     );
   }, [
     filters.minAreaM2,
+    filters.maxAreaM2,
     filters.minBathrooms,
     filters.minBedrooms,
     filters.minParking,
     filters.maxDaysFresh,
+    filters.dealType,
     filters.maxPrice,
+    filters.maxRent,
     filters.minPrice,
+    filters.minRent,
     filters.neighborhood_normalized,
     filters.portal,
-    filters.propertyType,
+    filters.propertyTypes,
     filters.sort
   ]);
 
@@ -288,6 +312,22 @@ export default function BuscadorPage() {
         : ""
     );
   }, [filters.maxPrice]);
+
+  useEffect(() => {
+    setMinRentInput(
+      typeof filters.minRent === "number"
+        ? formatThousandsBR(String(filters.minRent))
+        : ""
+    );
+  }, [filters.minRent]);
+
+  useEffect(() => {
+    setMaxRentInput(
+      typeof filters.maxRent === "number"
+        ? formatThousandsBR(String(filters.maxRent))
+        : ""
+    );
+  }, [filters.maxRent]);
 
   useEffect(() => {
     if (!filters.neighborhood_normalized) {
@@ -535,14 +575,17 @@ export default function BuscadorPage() {
     ).toISOString();
 
     const selectBase =
-      "id, title, price, city, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, portal, first_seen_at, scraped_at, last_seen_at, main_image_url, url";
+      "id, title, price, total_cost, condo_fee, iptu, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, portal, published_at, first_seen_at, scraped_at, last_seen_at, main_image_url, url";
     const selectWithGeo = `${selectBase}, latitude, longitude`;
 
     const buildQuery = (select: string) => {
+      const queryDealType = filters.dealType || "venda";
+      const totalPriceColumn = queryDealType === "aluguel" ? "total_cost" : "price";
       let query = supabase
         .from("listings")
         .select(select)
         .eq("city", "Campinas")
+        .eq("deal_type", queryDealType)
         .gte("first_seen_at", cutoffDate)
         .order("first_seen_at", { ascending: false })
         .limit(240);
@@ -558,28 +601,47 @@ export default function BuscadorPage() {
         );
       }
 
-      if (filters.propertyType) {
-        query = query.eq("property_type", filters.propertyType);
+      const propertyFilterOr = buildUnifiedPropertySupabaseOrFilter(filters.propertyTypes);
+      if (propertyFilterOr) {
+        query = query.or(propertyFilterOr);
+      }
+
+      if (typeof filters.minPrice === "number") {
+        query = query.gte(totalPriceColumn, filters.minPrice);
+      }
+
+      if (typeof filters.maxPrice === "number") {
+        query = query.lte(totalPriceColumn, filters.maxPrice);
+      }
+
+      if (queryDealType === "aluguel") {
+        if (typeof filters.minRent === "number") {
+          query = query.gte("price", filters.minRent);
+        }
+
+        if (typeof filters.maxRent === "number") {
+          query = query.lte("price", filters.maxRent);
+        }
       }
 
       const minBedrooms = parseMinFilter(filters.minBedrooms);
       if (minBedrooms !== null) {
-        query = query.or(`bedrooms.gte.${minBedrooms},bedrooms.eq.0`);
+        query = query.gte("bedrooms", minBedrooms);
       }
 
       const minBathrooms = parseMinFilter(filters.minBathrooms);
       if (minBathrooms !== null) {
-        query = query.or(`bathrooms.gte.${minBathrooms},bathrooms.eq.0`);
+        query = query.gte("bathrooms", minBathrooms);
       }
 
       const minParking = parseMinFilter(filters.minParking);
       if (minParking !== null) {
-        query = query.or(`parking.gte.${minParking},parking.eq.0`);
+        query = query.gte("parking", minParking);
       }
 
       const minAreaM2 = parseMinFilter(filters.minAreaM2);
       if (minAreaM2 !== null) {
-        query = query.or(`area_m2.gte.${minAreaM2},area_m2.eq.0`);
+        query = query.gte("area_m2", minAreaM2);
       }
 
       return query;
@@ -615,8 +677,13 @@ export default function BuscadorPage() {
   }, [
     supabase,
     filters.maxDaysFresh,
+    filters.dealType,
     filters.portal,
-    filters.propertyType,
+    filters.propertyTypes,
+    filters.minPrice,
+    filters.maxPrice,
+    filters.minRent,
+    filters.maxRent,
     filters.minBedrooms,
     filters.minBathrooms,
     filters.minParking,
@@ -743,10 +810,12 @@ export default function BuscadorPage() {
             return;
           }
 
-          if (
-            currentFilters.propertyType &&
-            listing.property_type !== currentFilters.propertyType
-          ) {
+          const currentDealType = currentFilters.dealType || "venda";
+          if (listing.deal_type && listing.deal_type !== currentDealType) {
+            return;
+          }
+
+          if (!matchesUnifiedPropertyFilter(listing, currentFilters.propertyTypes)) {
             return;
           }
 
@@ -760,18 +829,42 @@ export default function BuscadorPage() {
             if (!candidate.startsWith(pattern)) return;
           }
 
+          const listingComparablePrice = getListingComparablePrice(
+            listing,
+            currentDealType
+          );
+          const listingRentPrice = listing.price;
+
           if (
             typeof currentFilters.minPrice === "number" &&
-            typeof listing.price === "number" &&
-            listing.price < currentFilters.minPrice
+            typeof listingComparablePrice === "number" &&
+            listingComparablePrice < currentFilters.minPrice
           ) {
             return;
           }
 
           if (
             typeof currentFilters.maxPrice === "number" &&
-            typeof listing.price === "number" &&
-            listing.price > currentFilters.maxPrice
+            typeof listingComparablePrice === "number" &&
+            listingComparablePrice > currentFilters.maxPrice
+          ) {
+            return;
+          }
+
+          if (
+            currentDealType === "aluguel" &&
+            typeof currentFilters.minRent === "number" &&
+            typeof listingRentPrice === "number" &&
+            listingRentPrice < currentFilters.minRent
+          ) {
+            return;
+          }
+
+          if (
+            currentDealType === "aluguel" &&
+            typeof currentFilters.maxRent === "number" &&
+            typeof listingRentPrice === "number" &&
+            listingRentPrice > currentFilters.maxRent
           ) {
             return;
           }
@@ -896,97 +989,119 @@ export default function BuscadorPage() {
   return (
     <div className="min-w-0 space-y-6">
       <div className="grid min-w-0 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-        <Card className="space-y-6">
+        <Card className="space-y-4 p-5 sm:p-6">
           <div>
             <p className="text-[10px] uppercase tracking-[0.4em] text-zinc-500">
               Filtros
             </p>
-            <h3 className="mt-2 text-lg section-title">Ajuste o radar</h3>
-            <p className="mt-2 text-xs text-zinc-500">
-              Alguns anuncios podem vir sem dados completos por enquanto.
-            </p>
-            {organizationContext ? (
-              <p className="mt-2 text-[11px] text-zinc-500">
-                Organizacao ativa: {organizationContext.organization.name}
-              </p>
-            ) : null}
           </div>
 
-          <div className="space-y-2">
-            <label className="text-xs text-zinc-500">Dias frescos</label>
-            <div className="flex rounded-full accent-surface p-1">
-              {dayOptions.map((option) => {
-                const active = filters.maxDaysFresh === option.value;
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    onClick={() =>
-                      setFilters({ maxDaysFresh: option.value as 7 | 15 | 30 })
-                    }
-                    className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold transition border border-transparent hover:border-zinc-700 ${active
-                      ? "is-active-fixed"
-                      : "bg-surface text-zinc-400 hover:text-white"
-                      }`}
-                    aria-pressed={active}
-                  >
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="grid gap-4">
-            <NeighborhoodAutocomplete
-              label="Bairro"
-              placeholder="Digite o bairro"
-              city="Campinas"
-              organizationId={organizationId}
-              value={neighborhoodQuery}
-              onChange={(nextValue) => {
-                setNeighborhoodQuery(nextValue);
-                setFilters({
-                  neighborhood_normalized: normalizeText(nextValue)
-                });
-              }}
-              onSelect={(item) => {
-                setNeighborhoodQuery(item.name);
-                setFilters({
-                  neighborhood_normalized: item.name_normalized
-                });
-              }}
-              onClear={() => {
-                setNeighborhoodQuery("");
-                setFilters({ neighborhood_normalized: "" });
-              }}
-            />
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <label htmlFor="portal-filter" className="text-xs text-zinc-500">
-                  Portal
+          <div className="space-y-3">
+            <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-3.5">
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-zinc-400">
+                  Dias frescos
                 </label>
-                <select
-                  id="portal-filter"
-                  aria-label="Filtrar por portal"
-                  value={filters.portal ?? ""}
-                  onChange={(event) =>
-                    setFilters({ portal: event.target.value || "" })
-                  }
-                  className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
-                >
-                  <option value="">Todos os portais</option>
-                  {portals.map((portal) => (
-                    <option key={portal} value={portal}>
-                      {portalLabels[portal]}
-                    </option>
-                  ))}
-                </select>
+                <div className="grid grid-cols-3 gap-1 rounded-xl border border-zinc-800 bg-black/30 p-1">
+                  {dayOptions.map((option) => {
+                    const active = filters.maxDaysFresh === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() =>
+                          setFilters({ maxDaysFresh: option.value as 7 | 15 | 30 })
+                        }
+                        className={`rounded-lg px-2 py-2 text-xs font-semibold transition ${active
+                          ? "is-active-fixed bg-surface-lifted text-white shadow-[0_0_0_1px_rgba(255,255,255,0.06)]"
+                          : "text-zinc-400 hover:bg-white/5 hover:text-white"
+                          }`}
+                        aria-pressed={active}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
+            </div>
 
+            <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-3.5">
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-zinc-400">
+                  Tipo de negocio
+                </label>
+                <div className="rounded-xl border border-zinc-800 bg-black/30 p-1">
+                  <div className="grid grid-cols-2 gap-1">
+                    {dealTypeOptions.map((option) => {
+                      const active = (filters.dealType || "venda") === option.value;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() =>
+                            setFilters({
+                              dealType: option.value as "venda" | "aluguel"
+                            })
+                          }
+                          className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition ${active
+                            ? "is-active-fixed bg-surface-lifted text-white shadow-[0_0_0_1px_rgba(255,255,255,0.08)]"
+                            : "text-zinc-400 hover:bg-white/5 hover:text-white"
+                            }`}
+                          aria-pressed={active}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-3.5">
+              <NeighborhoodAutocomplete
+                label="Bairro"
+                placeholder="Digite o bairro"
+                city="Campinas"
+                organizationId={organizationId}
+                value={neighborhoodQuery}
+                onChange={(nextValue) => {
+                  setNeighborhoodQuery(nextValue);
+                  setFilters({
+                    neighborhood_normalized: normalizeText(nextValue)
+                  });
+                }}
+                onSelect={(item) => {
+                  setNeighborhoodQuery(item.name);
+                  setFilters({
+                    neighborhood_normalized: item.name_normalized
+                  });
+                }}
+                onClear={() => {
+                  setNeighborhoodQuery("");
+                  setFilters({ neighborhood_normalized: "" });
+                }}
+              />
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-4">
               <div className="space-y-1.5">
-                <label htmlFor="sort-filter" className="text-xs text-zinc-500">
+                <p className="text-xs font-medium text-zinc-400">Tipo de imóvel</p>
+                <PropertyCategoryMultiSelect
+                  value={selectedUnifiedPropertyTypes}
+                  onChange={(next) => setFilters({ propertyTypes: next })}
+                  placeholder="Tipo de imóvel"
+                />
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-4">
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="sort-filter"
+                  className="text-xs font-medium text-zinc-400"
+                >
                   Ordenar por
                 </label>
                 <select
@@ -1013,155 +1128,253 @@ export default function BuscadorPage() {
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label htmlFor="property-type-filter" className="text-xs text-zinc-500">
-                Tipo de imovel
-              </label>
-              <select
-                id="property-type-filter"
-                aria-label="Filtrar por tipo de imovel"
-                value={filters.propertyType ?? ""}
-                onChange={(event) =>
-                  setFilters({
-                    propertyType: (event.target.value || undefined) as
-                      | "apartment"
-                      | "house"
-                      | "other"
-                      | "land"
-                      | undefined
-                  })
-                }
-                className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
-              >
-                {propertyTypeOptions.map((option) => (
-                  <option key={option.value || "all"} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+            <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-4 space-y-3">
+              <p className="text-xs font-medium text-zinc-400">
+                {isRentalDealType ? "Valores de aluguel" : "Faixa de preco"}
+              </p>
+
+              {isRentalDealType ? (
+                <div className="space-y-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-zinc-500">Aluguel minimo</label>
+                      <Input
+                        type="text"
+                        placeholder="Aluguel minimo"
+                        value={minRentInput}
+                        onChange={(event) => {
+                          const formatted = formatThousandsBR(event.target.value);
+                          setMinRentInput(formatted);
+                          const parsed = parseBRNumber(formatted);
+                          setFilters({
+                            minRent: parsed ?? undefined
+                          });
+                        }}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-zinc-500">Aluguel maximo</label>
+                      <Input
+                        type="text"
+                        placeholder="Aluguel maximo"
+                        value={maxRentInput}
+                        onChange={(event) => {
+                          const formatted = formatThousandsBR(event.target.value);
+                          setMaxRentInput(formatted);
+                          const parsed = parseBRNumber(formatted);
+                          setFilters({
+                            maxRent: parsed ?? undefined
+                          });
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-zinc-500">
+                        Preco total minimo
+                      </label>
+                      <Input
+                        type="text"
+                        placeholder="Preco total minimo"
+                        value={minPriceInput}
+                        onChange={(event) => {
+                          const formatted = formatThousandsBR(event.target.value);
+                          setMinPriceInput(formatted);
+                          const parsed = parseBRNumber(formatted);
+                          setFilters({
+                            minPrice: parsed ?? undefined
+                          });
+                        }}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-zinc-500">
+                        Preco total maximo
+                      </label>
+                      <Input
+                        type="text"
+                        placeholder="Preco total maximo"
+                        value={maxPriceInput}
+                        onChange={(event) => {
+                          const formatted = formatThousandsBR(event.target.value);
+                          setMaxPriceInput(formatted);
+                          const parsed = parseBRNumber(formatted);
+                          setFilters({
+                            maxPrice: parsed ?? undefined
+                          });
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-zinc-500">Preco minimo</label>
+                    <Input
+                      type="text"
+                      placeholder="Preco minimo"
+                      value={minPriceInput}
+                      onChange={(event) => {
+                        const formatted = formatThousandsBR(event.target.value);
+                        setMinPriceInput(formatted);
+                        const parsed = parseBRNumber(formatted);
+                        setFilters({
+                          minPrice: parsed ?? undefined
+                        });
+                      }}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-zinc-500">Preco maximo</label>
+                    <Input
+                      type="text"
+                      placeholder="Preco maximo"
+                      value={maxPriceInput}
+                      onChange={(event) => {
+                        const formatted = formatThousandsBR(event.target.value);
+                        setMaxPriceInput(formatted);
+                        const parsed = parseBRNumber(formatted);
+                        setFilters({
+                          maxPrice: parsed ?? undefined
+                        });
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <label className="text-xs text-zinc-500">Preco min.</label>
-                <Input
-                  type="text"
-                  placeholder="100.000"
-                  value={minPriceInput}
-                  onChange={(event) => {
-                    const formatted = formatThousandsBR(event.target.value);
-                    setMinPriceInput(formatted);
-                    const parsed = parseBRNumber(formatted);
-                    setFilters({
-                      minPrice: parsed ?? undefined
-                    });
-                  }}
-                />
-              </div>
+            <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-4 space-y-4">
+              <p className="text-xs font-medium text-zinc-400">Caracteristicas</p>
 
-              <div className="space-y-1.5">
-                <label className="text-xs text-zinc-500">Preco max.</label>
-                <Input
-                  type="text"
-                  placeholder="900.000"
-                  value={maxPriceInput}
-                  onChange={(event) => {
-                    const formatted = formatThousandsBR(event.target.value);
-                    setMaxPriceInput(formatted);
-                    const parsed = parseBRNumber(formatted);
-                    setFilters({
-                      maxPrice: parsed ?? undefined
-                    });
-                  }}
-                />
+              <div className="grid gap-4">
+                <div className="grid grid-cols-3 gap-x-3 gap-y-4">
+                  <div className="grid content-start gap-2">
+                    <label className="min-h-8 text-xs leading-4 text-zinc-500">
+                      Quartos min.
+                    </label>
+                    <Input
+                      className="h-10 px-3.5"
+                      type="number"
+                      min={0}
+                      placeholder="Minimo"
+                      value={filters.minBedrooms ?? ""}
+                      onChange={(event) =>
+                        setFilters({
+                          minBedrooms: parseNumberInput(event.target.value)
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="grid content-start gap-2">
+                    <label className="min-h-8 text-xs leading-4 text-zinc-500">
+                      Banheiros min.
+                    </label>
+                    <Input
+                      className="h-10 px-3.5"
+                      type="number"
+                      min={0}
+                      placeholder="Minimo"
+                      value={filters.minBathrooms ?? ""}
+                      onChange={(event) =>
+                        setFilters({
+                          minBathrooms: parseNumberInput(event.target.value)
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="grid content-start gap-2">
+                    <label className="min-h-8 text-xs leading-4 text-zinc-500">
+                      Vagas min.
+                    </label>
+                    <Input
+                      className="h-10 px-3.5"
+                      type="number"
+                      min={0}
+                      placeholder="Minimo"
+                      value={filters.minParking ?? ""}
+                      onChange={(event) =>
+                        setFilters({
+                          minParking: parseNumberInput(event.target.value)
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-x-3 gap-y-4 sm:grid-cols-2">
+                  <div className="grid content-start gap-2">
+                    <label className="text-xs leading-4 text-zinc-500">
+                      Area minima (m2)
+                    </label>
+                    <Input
+                      className="h-10 px-3.5"
+                      type="number"
+                      min={0}
+                      placeholder="Area minima"
+                      value={filters.minAreaM2 ?? ""}
+                      onChange={(event) =>
+                        setFilters({
+                          minAreaM2: parseNumberInput(event.target.value)
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="grid content-start gap-2">
+                    <label className="text-xs leading-4 text-zinc-500">
+                      Area maxima (m2)
+                    </label>
+                    <Input
+                      className="h-10 px-3.5"
+                      type="number"
+                      min={0}
+                      placeholder="Area maxima"
+                      value={filters.maxAreaM2 ?? ""}
+                      onChange={(event) =>
+                        setFilters({
+                          maxAreaM2: parseNumberInput(event.target.value)
+                        })
+                      }
+                    />
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <label className="text-xs text-zinc-500">Quartos min.</label>
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="2"
-                  value={filters.minBedrooms ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      minBedrooms: parseNumberInput(event.target.value)
-                    })
-                  }
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs text-zinc-500">Banheiros min.</label>
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="2"
-                  value={filters.minBathrooms ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      minBathrooms: parseNumberInput(event.target.value)
-                    })
-                  }
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs text-zinc-500">Vagas min.</label>
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="1"
-                  value={filters.minParking ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      minParking: parseNumberInput(event.target.value)
-                    })
-                  }
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs text-zinc-500">Area total min. (m2)</label>
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="60"
-                  value={filters.minAreaM2 ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      minAreaM2: parseNumberInput(event.target.value)
-                    })
-                  }
-                />
-              </div>
-            </div>
+            <Button
+              variant="ghost"
+              className="h-9 w-full justify-center rounded-xl text-xs uppercase tracking-[0.25em]"
+              onClick={() => {
+                setNeighborhoodQuery("");
+                setFilters({
+                  maxDaysFresh: 15,
+                  neighborhood_normalized: "",
+                  minPrice: undefined,
+                  maxPrice: undefined,
+                  minRent: undefined,
+                  maxRent: undefined,
+                  minBedrooms: undefined,
+                  minBathrooms: undefined,
+                  minParking: undefined,
+                  minAreaM2: undefined,
+                  maxAreaM2: undefined,
+                  propertyTypes: [],
+                  dealType: "venda",
+                  portal: "",
+                  sort: "date_desc"
+                });
+              }}
+            >
+              Limpar filtros
+            </Button>
           </div>
-
-          <Button
-            variant="ghost"
-            className="h-8 px-3 text-xs uppercase tracking-[0.3em]"
-            onClick={() => {
-              setNeighborhoodQuery("");
-              setFilters({
-                maxDaysFresh: 15,
-                neighborhood_normalized: "",
-                minPrice: undefined,
-                maxPrice: undefined,
-                minBedrooms: undefined,
-                minBathrooms: undefined,
-                minParking: undefined,
-                minAreaM2: undefined,
-                propertyType: undefined,
-                portal: "",
-                sort: "date_desc"
-              });
-            }}
-          >
-            Limpar
-          </Button>
         </Card>
 
         <div className="min-w-0 space-y-6">
@@ -1276,7 +1489,7 @@ export default function BuscadorPage() {
             </div>
           </div>
         </div>
-      </div>
-    </div>
+      </div >
+    </div >
   );
 }

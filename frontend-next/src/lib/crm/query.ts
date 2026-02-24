@@ -1,6 +1,11 @@
 import { queryOptions } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizeText } from "@/lib/format/text";
+import {
+  isTerrenoListing,
+  matchesUnifiedPropertyFilter,
+  normalizeUnifiedPropertyCategories
+} from "@/lib/listings/unifiedPropertyFilter";
 
 export type PipelineStatus =
   | "novo_match"
@@ -68,12 +73,15 @@ export type ClientFilter = {
   active: boolean;
   min_price: number | null;
   max_price: number | null;
+  min_rent?: number | null;
+  max_rent?: number | null;
   neighborhoods: string[];
   min_bedrooms: number | null;
   min_bathrooms?: number | null;
   min_parking?: number | null;
   min_area_m2?: number | null;
   max_area_m2?: number | null;
+  deal_type?: "venda" | "aluguel" | null;
   max_days_fresh: number | null;
   property_types: string[] | null;
 };
@@ -82,12 +90,15 @@ export type Listing = {
   id: string;
   title: string | null;
   price: number | null;
+  total_cost?: number | null;
   neighborhood: string | null;
   bedrooms: number | null;
   bathrooms: number | null;
   parking: number | null;
   area_m2: number | null;
+  deal_type: "venda" | "aluguel" | null;
   property_type: "apartment" | "house" | "other" | "land" | null;
+  property_subtype?: string | null;
   url: string | null;
   main_image_url: string | null;
   published_at?: string | null;
@@ -185,8 +196,8 @@ const passesMinOrZero = (
   minValue: number | null
 ) => {
   if (minValue === null) return true;
-  if (typeof listingValue !== "number" || !Number.isFinite(listingValue)) return true;
-  return listingValue === 0 || listingValue >= minValue;
+  if (typeof listingValue !== "number" || !Number.isFinite(listingValue)) return false;
+  return listingValue >= minValue;
 };
 
 const passesMaxOrZero = (
@@ -244,16 +255,41 @@ const isWithinFreshWindow = (
   return ts >= cutoff;
 };
 
+const getListingComparablePrice = (
+  listing: Listing | null | undefined,
+  dealType: "venda" | "aluguel"
+) => (dealType === "aluguel" ? listing?.total_cost : listing?.price);
+
+const getListingRentPrice = (listing: Listing | null | undefined) => listing?.price;
+
 const isWithinPriceRange = (
   listing?: Listing | null,
   filter?: ClientFilter | null
 ) => {
   const min = parseMinFilter(filter?.min_price);
   const max = parseMinFilter(filter?.max_price);
-  if (min === null || max === null) return true;
-  const price = listing?.price;
-  if (typeof price !== "number") return false;
-  return price >= min && price <= max;
+  const dealType = filter?.deal_type ?? "venda";
+  if (min !== null && max !== null) {
+    const price = getListingComparablePrice(listing, dealType);
+    if (typeof price !== "number" || price < min || price > max) return false;
+  }
+
+  if (dealType === "aluguel") {
+    const minRent = parseMinFilter(filter?.min_rent);
+    const maxRent = parseMinFilter(filter?.max_rent);
+    if (minRent !== null && maxRent !== null) {
+      const rentValue = getListingRentPrice(listing);
+      if (
+        typeof rentValue !== "number" ||
+        rentValue < minRent ||
+        rentValue > maxRent
+      ) {
+        return false;
+      }
+    }
+  }
+
+  return true;
 };
 
 const isWithinListingRules = (
@@ -269,18 +305,19 @@ const isWithinListingRules = (
   const maxAreaM2 = parseMinFilter(filter.max_area_m2);
   const propertyTypes =
     Array.isArray(filter.property_types) && filter.property_types.length > 0
-      ? filter.property_types.map((item) => item.toLowerCase())
+      ? normalizeUnifiedPropertyCategories(filter.property_types)
       : [];
 
-  if (propertyTypes.length > 0) {
-    const listingType = (listing.property_type ?? "").toLowerCase();
-    if (!propertyTypes.includes(listingType)) return false;
+  if (propertyTypes.length > 0 && !matchesUnifiedPropertyFilter(listing, propertyTypes)) {
+    return false;
   }
 
-  const isLand = listing.property_type === "land";
-  if (!isLand && !passesMinOrZero(listing.bedrooms, minBedrooms)) return false;
-  if (!isLand && !passesMinOrZero(listing.bathrooms, minBathrooms)) return false;
-  if (!isLand && !passesMinOrZero(listing.parking, minParking)) return false;
+  if (filter.deal_type && listing.deal_type && listing.deal_type !== filter.deal_type) return false;
+
+  const isTerreno = isTerrenoListing(listing);
+  if (!isTerreno && !passesMinOrZero(listing.bedrooms, minBedrooms)) return false;
+  if (!isTerreno && !passesMinOrZero(listing.bathrooms, minBathrooms)) return false;
+  if (!isTerreno && !passesMinOrZero(listing.parking, minParking)) return false;
   if (!passesMinOrZero(listing.area_m2, minAreaM2)) return false;
   if (!passesMaxOrZero(listing.area_m2, maxAreaM2)) return false;
 
@@ -381,6 +418,8 @@ const fetchClientFilter = async (args: {
 }) => {
   const { supabase, organizationId, clientId } = args;
   const selectVariants = [
+    "id, org_id, client_id, active, min_price, max_price, min_rent, max_rent, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_area_m2, max_days_fresh, property_types, deal_type",
+    "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_area_m2, max_days_fresh, property_types, deal_type",
     "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_area_m2, max_days_fresh, property_types",
     "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_parking, max_days_fresh, property_types",
     "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_area_m2, max_area_m2, max_days_fresh, property_types",
@@ -430,7 +469,7 @@ const enrichMatchesWithListings = async (args: {
   let listingQuery = supabase
     .from("listings")
     .select(
-      "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at"
+      "id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at"
     )
     .in("id", ids);
 
@@ -464,7 +503,7 @@ const fetchMatchBucket = async (args: {
   const { data, error } = await supabase
     .from("automated_matches")
     .select(
-      "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listings(id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at)"
+      "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listings(id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at)"
     )
     .eq("org_id", organizationId)
     .eq("client_id", clientId)

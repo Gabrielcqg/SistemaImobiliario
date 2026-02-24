@@ -25,6 +25,7 @@ const toListing = (candidate: CaptureCandidate): Listing => ({
   bathrooms: candidate.bathrooms,
   parking: candidate.parking,
   area_m2: candidate.area_m2,
+  deal_type: null,
   property_type: candidate.property_type,
   portal: candidate.portal,
   first_seen_at: candidate.first_seen_at,

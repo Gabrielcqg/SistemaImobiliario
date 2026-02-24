@@ -3,17 +3,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { normalizeText } from "@/lib/format/text";
+import {
+  buildUnifiedPropertySupabaseOrFilter,
+  normalizeUnifiedPropertyCategories,
+  type UnifiedPropertyCategory
+} from "@/lib/listings/unifiedPropertyFilter";
 
 export type ListingsFilters = {
   maxDaysFresh: 7 | 15 | 30;
   neighborhood_normalized?: string;
   minPrice?: number;
   maxPrice?: number;
+  minRent?: number;
+  maxRent?: number;
   minBedrooms?: number;
   minBathrooms?: number;
   minParking?: number;
   minAreaM2?: number;
-  propertyType?: "apartment" | "house" | "other" | "land";
+  maxAreaM2?: number;
+  dealType?: "venda" | "aluguel";
+  propertyTypes?: UnifiedPropertyCategory[];
   portal?: string;
   sort?: "date_desc" | "date_asc" | "price_asc" | "price_desc";
 };
@@ -22,6 +31,9 @@ export type Listing = {
   id: string;
   title: string | null;
   price: number | null;
+  total_cost?: number | null;
+  condo_fee?: number | null;
+  iptu?: number | null;
   city: string | null;
   state: string | null;
   neighborhood: string | null;
@@ -30,8 +42,11 @@ export type Listing = {
   bathrooms: number | null;
   parking: number | null;
   area_m2: number | null;
+  deal_type: "venda" | "aluguel" | null;
   property_type: "apartment" | "house" | "other" | "land" | null;
+  property_subtype?: string | null;
   portal: string | null;
+  published_at?: string | null;
   first_seen_at: string | null;
   scraped_at?: string | null;
   last_seen_at?: string | null;
@@ -80,9 +95,10 @@ export function useListings(
 ): UseListingsResult {
   const { organizationId = null, organizationReady = true } = options;
   const [filters, setFiltersState] = useState<ListingsFilters>({
-
     sort: "date_desc",
-    ...initialFilters
+    dealType: "venda",
+    ...initialFilters,
+    propertyTypes: normalizeUnifiedPropertyCategories(initialFilters.propertyTypes)
   });
   const [page, setPage] = useState(0);
   const [data, setData] = useState<Listing[]>([]);
@@ -96,7 +112,13 @@ export function useListings(
   const debouncedFilters = useDebouncedValue(filters, 400);
 
   const setFilters = useCallback((next: Partial<ListingsFilters>) => {
-    setFiltersState((prev) => ({ ...prev, ...next }));
+    setFiltersState((prev) => {
+      const merged: ListingsFilters = { ...prev, ...next };
+      if (Object.prototype.hasOwnProperty.call(next, "propertyTypes")) {
+        merged.propertyTypes = normalizeUnifiedPropertyCategories(next.propertyTypes);
+      }
+      return merged;
+    });
     setPage(0);
   }, []);
 
@@ -133,7 +155,7 @@ export function useListings(
       let query = supabase
         .from("listings")
         .select(
-          "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, portal, first_seen_at, scraped_at, last_seen_at, main_image_url, url",
+          "id, title, price, total_cost, condo_fee, iptu, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, portal, published_at, first_seen_at, scraped_at, last_seen_at, main_image_url, url",
           { count: "exact" }
         )
         .gte("first_seen_at", cutoffDate)
@@ -150,37 +172,58 @@ export function useListings(
         query = query.eq("portal", debouncedFilters.portal);
       }
 
-      if (debouncedFilters.propertyType) {
-        query = query.eq("property_type", debouncedFilters.propertyType);
+      const activeDealType = debouncedFilters.dealType || "venda";
+      const priceColumn = activeDealType === "aluguel" ? "total_cost" : "price";
+      query = query.eq("deal_type", activeDealType);
+
+      const propertyFilterOr = buildUnifiedPropertySupabaseOrFilter(
+        debouncedFilters.propertyTypes
+      );
+      if (propertyFilterOr) {
+        query = query.or(propertyFilterOr);
       }
 
       if (typeof debouncedFilters.minPrice === "number") {
-        query = query.gte("price", debouncedFilters.minPrice);
+        query = query.gte(priceColumn, debouncedFilters.minPrice);
       }
 
       if (typeof debouncedFilters.maxPrice === "number") {
-        query = query.lte("price", debouncedFilters.maxPrice);
+        query = query.lte(priceColumn, debouncedFilters.maxPrice);
+      }
+
+      if (activeDealType === "aluguel") {
+        if (typeof debouncedFilters.minRent === "number") {
+          query = query.gte("price", debouncedFilters.minRent);
+        }
+
+        if (typeof debouncedFilters.maxRent === "number") {
+          query = query.lte("price", debouncedFilters.maxRent);
+        }
       }
 
       const minBedrooms = parseMinFilter(debouncedFilters.minBedrooms);
       if (minBedrooms !== null) {
-        // Regra temporaria: inclui dados zerados para nao perder anuncios.
-        query = query.or(`bedrooms.gte.${minBedrooms},bedrooms.eq.0`);
+        query = query.gte("bedrooms", minBedrooms);
       }
 
       const minBathrooms = parseMinFilter(debouncedFilters.minBathrooms);
       if (minBathrooms !== null) {
-        query = query.or(`bathrooms.gte.${minBathrooms},bathrooms.eq.0`);
+        query = query.gte("bathrooms", minBathrooms);
       }
 
       const minParking = parseMinFilter(debouncedFilters.minParking);
       if (minParking !== null) {
-        query = query.or(`parking.gte.${minParking},parking.eq.0`);
+        query = query.gte("parking", minParking);
       }
 
       const minAreaM2 = parseMinFilter(debouncedFilters.minAreaM2);
       if (minAreaM2 !== null) {
-        query = query.or(`area_m2.gte.${minAreaM2},area_m2.eq.0`);
+        query = query.gte("area_m2", minAreaM2);
+      }
+
+      const maxAreaM2 = parseMinFilter(debouncedFilters.maxAreaM2);
+      if (maxAreaM2 !== null) {
+        query = query.lte("area_m2", maxAreaM2);
       }
 
       const sort = debouncedFilters.sort ?? "date_desc";
@@ -189,10 +232,10 @@ export function useListings(
       } else if (sort === "date_asc") {
         query = query.order("first_seen_at", { ascending: true });
       } else if (sort === "price_asc") {
-        query = query.order("price", { ascending: true, nullsFirst: false });
+        query = query.order(priceColumn, { ascending: true, nullsFirst: false });
         query = query.order("first_seen_at", { ascending: false });
       } else if (sort === "price_desc") {
-        query = query.order("price", { ascending: false, nullsFirst: false });
+        query = query.order(priceColumn, { ascending: false, nullsFirst: false });
         query = query.order("first_seen_at", { ascending: false });
       }
 

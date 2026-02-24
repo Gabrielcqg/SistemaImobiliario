@@ -118,6 +118,7 @@ export type CaptureCandidate = {
   parking: number | null;
   area_m2: number | null;
   property_type: "apartment" | "house" | "other" | "land" | null;
+  property_subtype?: string | null;
   portal: string | null;
   first_seen_at: string | null;
   published_at: string | null;

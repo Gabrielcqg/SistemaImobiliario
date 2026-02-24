@@ -13,6 +13,10 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # ============================================================
 # 1) Configuração / ENV
 # ============================================================
+
+from dotenv import load_dotenv
+load_dotenv() # Lê o seu arquivo .env local
+
 env_path = Path(__file__).resolve().parent.parent / ".env"
 if not env_path.exists():
     env_path = Path(__file__).resolve().parent / ".env"

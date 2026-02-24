@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { BarChart3, BrainCircuit, Search, Users } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
@@ -89,12 +90,26 @@ function Sidebar() {
 
   return (
     <aside className="w-full border-b border-zinc-800 bg-black/80 px-4 py-4 sm:px-6 md:h-screen md:w-64 md:shrink-0 md:overflow-y-auto md:border-b-0 md:border-r md:px-6 md:py-6">
-      <div className="flex items-center justify-between md:flex-col md:items-start md:gap-8">
-        <div>
-          <p className="text-xs uppercase tracking-[0.4em] text-zinc-500">
-            Projeto
-          </p>
-          <h2 className="mt-2 text-lg font-semibold">HomeRadar</h2>
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-800/90 pb-4 md:pb-5">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="relative mr-3 flex h-24 w-24 shrink-0 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-950/80 sm:h-28 sm:w-28">
+            <Image
+              src="/imoradar-logo.png"
+              alt="ImoRadar"
+              fill
+              sizes="(max-width: 640px) 96px, 112px"
+              className="object-contain p-0"
+              priority
+            />
+          </div>
+          <div className="min-w-0">
+            <p className="text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Plataforma
+            </p>
+            <h2 className="truncate text-base font-semibold text-zinc-100">
+              RadarImo
+            </h2>
+          </div>
         </div>
         <button
           type="button"

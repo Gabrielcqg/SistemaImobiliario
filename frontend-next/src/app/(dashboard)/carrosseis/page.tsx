@@ -157,6 +157,7 @@ const normalizeListingRow = (row: Record<string, unknown>): CarouselListing => {
     bathrooms: toIntOrNull(row.bathrooms),
     parking: toIntOrNull(row.parking),
     area_m2: toNumberOrNull(row.area_m2),
+    deal_type: null,
     property_type: propertyType,
     portal: typeof row.portal === "string" ? row.portal : null,
     first_seen_at: typeof row.first_seen_at === "string" ? row.first_seen_at : null,

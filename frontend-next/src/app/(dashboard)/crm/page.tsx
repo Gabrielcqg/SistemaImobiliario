@@ -12,6 +12,7 @@ import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import SkeletonList from "@/components/ui/SkeletonList";
 import NeighborhoodAutocomplete from "@/components/filters/NeighborhoodAutocomplete";
+import PropertyCategoryMultiSelect from "@/components/filters/PropertyCategoryMultiSelect";
 import { useOrganizationContext } from "@/lib/auth/useOrganizationContext";
 import {
   createCrmClientBundleQueryOptions,
@@ -21,6 +22,13 @@ import {
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { formatThousandsBR, parseBRNumber } from "@/lib/format/numberInput";
 import { normalizeText } from "@/lib/format/text";
+import {
+  getUnifiedPropertyLabelForListing,
+  isTerrenoListing,
+  matchesUnifiedPropertyFilter,
+  normalizeUnifiedPropertyCategories,
+  type UnifiedPropertyCategory
+} from "@/lib/listings/unifiedPropertyFilter";
 
 type PipelineStatus =
   | "novo_match"
@@ -88,12 +96,15 @@ type ClientFilter = {
   active: boolean;
   min_price: number | null;
   max_price: number | null;
+  min_rent?: number | null;
+  max_rent?: number | null;
   neighborhoods: string[];
   min_bedrooms: number | null;
   min_bathrooms?: number | null;
   min_parking?: number | null;
   min_area_m2?: number | null;
   max_area_m2?: number | null;
+  deal_type?: "venda" | "aluguel" | null;
   max_days_fresh: number | null;
   property_types: string[] | null;
 };
@@ -102,12 +113,15 @@ type Listing = {
   id: string;
   title: string | null;
   price: number | null;
+  total_cost?: number | null;
   neighborhood: string | null;
   bedrooms: number | null;
   bathrooms: number | null;
   parking: number | null;
   area_m2: number | null;
+  deal_type: "venda" | "aluguel" | null;
   property_type: "apartment" | "house" | "other" | "land" | null;
+  property_subtype?: string | null;
   url: string | null;
   main_image_url: string | null;
   published_at?: string | null;
@@ -255,16 +269,11 @@ const NEXT_ACTION_SET = new Set<NextActionValue>(
 const LOST_REASON_SET = new Set<LostReasonValue>(
   LOST_REASON_OPTIONS.map((option) => option.value)
 );
-const PROPERTY_TYPE_OPTIONS = [
-  { value: "apartment", label: "apartment" },
-  { value: "house", label: "house" },
-  { value: "other", label: "other" },
-  { value: "land", label: "land" }
+const DEAL_TYPE_OPTIONS = [
+  { label: "Venda", value: "venda" },
+  { label: "Aluguel", value: "aluguel" }
 ] as const;
-type PropertyTypeValue = (typeof PROPERTY_TYPE_OPTIONS)[number]["value"];
-const PROPERTY_TYPE_SET = new Set<PropertyTypeValue>(
-  PROPERTY_TYPE_OPTIONS.map((option) => option.value)
-);
+type PropertyTypeValue = UnifiedPropertyCategory;
 const FRESHNESS_OPTIONS = [
   { label: "Todos", value: "" },
   { label: "7 dias", value: "7" },
@@ -381,14 +390,7 @@ const toArray = (value: string) =>
     .filter(Boolean);
 
 const toPropertyTypeValues = (value: string) => {
-  const unique = new Set<PropertyTypeValue>();
-  toArray(value).forEach((item) => {
-    const candidate = item.toLowerCase() as PropertyTypeValue;
-    if (PROPERTY_TYPE_SET.has(candidate)) {
-      unique.add(candidate);
-    }
-  });
-  return Array.from(unique);
+  return normalizeUnifiedPropertyCategories(toArray(value)) as PropertyTypeValue[];
 };
 
 const parseMinFilter = (value?: number | null) =>
@@ -516,9 +518,9 @@ const passesMinOrZero = (
 ) => {
   if (minValue === null) return true;
   if (typeof listingValue !== "number" || !Number.isFinite(listingValue)) {
-    return true;
+    return false;
   }
-  return listingValue === 0 || listingValue >= minValue;
+  return listingValue >= minValue;
 };
 
 const passesMaxOrZero = (
@@ -597,6 +599,8 @@ export default function CrmPage() {
     active: true,
     min_price: "",
     max_price: "",
+    min_rent: "",
+    max_rent: "",
     neighborhoods: "",
     min_bedrooms: "",
     min_bathrooms: "",
@@ -604,6 +608,7 @@ export default function CrmPage() {
     min_area_m2: "",
     max_area_m2: "",
     max_days_fresh: "15",
+    deal_type: "venda" as "venda" | "aluguel",
     property_types: ""
   });
   const [neighborhoodInput, setNeighborhoodInput] = useState("");
@@ -991,14 +996,6 @@ export default function CrmPage() {
     }));
   };
 
-  const togglePropertyType = (value: PropertyTypeValue) => {
-    if (selectedPropertyTypes.includes(value)) {
-      setPropertyTypeList(selectedPropertyTypes.filter((item) => item !== value));
-      return;
-    }
-    setPropertyTypeList([...selectedPropertyTypes, value]);
-  };
-
   const resetDraftFromClient = useCallback((client: Client | null) => {
     const nextDraft = {
       name: client?.name ?? "",
@@ -1088,6 +1085,22 @@ export default function CrmPage() {
 
   const getNeighborhood = (listing?: Listing | null) =>
     listing?.neighborhood ?? "Bairro não informado";
+  const getPropertyTypeLabel = (listing?: Listing | null) =>
+    getUnifiedPropertyLabelForListing(listing);
+  const getPortalLabel = (listing?: Listing | null) => {
+    if (!listing?.url) return "Sem portal";
+    try {
+      const hostname = new URL(listing.url).hostname.replace(/^www\./, "");
+      return hostname.split(".")[0]?.toUpperCase() || "Portal";
+    } catch {
+      return "Portal";
+    }
+  };
+
+  const getListingComparablePrice = (
+    listing: Listing | null | undefined,
+    dealType: "venda" | "aluguel"
+  ) => (dealType === "aluguel" ? listing?.total_cost : listing?.price);
 
   const isAfterLastViewed = (createdAt: string | null, clientId: string) => {
     if (!createdAt) return false;
@@ -1109,6 +1122,18 @@ export default function CrmPage() {
       typeof override?.max_price === "number"
         ? override.max_price
         : parseBRNumber(filterDraft.max_price);
+    return { min, max };
+  };
+
+  const getRentRange = (override?: ClientFilter | null) => {
+    const min =
+      typeof override?.min_rent === "number"
+        ? override.min_rent
+        : parseBRNumber(filterDraft.min_rent);
+    const max =
+      typeof override?.max_rent === "number"
+        ? override.max_rent
+        : parseBRNumber(filterDraft.max_rent);
     return { min, max };
   };
 
@@ -1134,11 +1159,10 @@ export default function CrmPage() {
         ? parseMinFilter(override.max_area_m2)
         : parseMinInput(filterDraft.max_area_m2);
     const propertyTypes = Array.isArray(override?.property_types)
-      ? override.property_types.filter(
-        (item): item is PropertyTypeValue =>
-          PROPERTY_TYPE_SET.has(item as PropertyTypeValue)
-      )
+      ? normalizeUnifiedPropertyCategories(override.property_types)
       : selectedPropertyTypes;
+
+    const dealType = override ? override.deal_type || "venda" : filterDraft.deal_type;
 
     return {
       minBedrooms,
@@ -1146,7 +1170,8 @@ export default function CrmPage() {
       minParking,
       minAreaM2,
       maxAreaM2,
-      propertyTypes
+      propertyTypes,
+      dealType
     };
   };
 
@@ -1176,18 +1201,61 @@ export default function CrmPage() {
     override?: ClientFilter | null
   ): boolean => {
     const { min, max } = getPriceRange(override);
-    if (typeof min !== "number" || typeof max !== "number") return true;
-    const price = listing?.price;
-    if (typeof price !== "number") return false;
-    return price >= min && price <= max;
+    const dealType = override?.deal_type ?? filterDraft.deal_type ?? "venda";
+    if (typeof min === "number" && typeof max === "number") {
+      const totalComparable = getListingComparablePrice(listing, dealType);
+      if (typeof totalComparable !== "number") return false;
+      if (totalComparable < min || totalComparable > max) return false;
+    }
+
+    if (dealType === "aluguel") {
+      const { min: minRent, max: maxRent } = getRentRange(override);
+      if (typeof minRent === "number" && typeof maxRent === "number") {
+        const rentValue = listing?.price;
+        if (typeof rentValue !== "number") return false;
+        if (rentValue < minRent || rentValue > maxRent) return false;
+      }
+    }
+
+    return true;
   };
 
   const filterByPriceRange = (rows: Match[], override?: ClientFilter | null) => {
     const { min, max } = getPriceRange(override);
-    if (typeof min !== "number" || typeof max !== "number") return rows;
+    const dealType = override?.deal_type ?? filterDraft.deal_type ?? "venda";
+    const { min: minRent, max: maxRent } = getRentRange(override);
+    if (
+      typeof min !== "number" &&
+      typeof max !== "number" &&
+      (dealType !== "aluguel" ||
+        (typeof minRent !== "number" && typeof maxRent !== "number"))
+    ) {
+      return rows;
+    }
     return rows.filter((row) => {
-      const price = row.listing?.price;
-      return typeof price === "number" && price >= min && price <= max;
+      if (typeof min === "number" && typeof max === "number") {
+        const totalComparable = getListingComparablePrice(row.listing, dealType);
+        if (
+          typeof totalComparable !== "number" ||
+          totalComparable < min ||
+          totalComparable > max
+        ) {
+          return false;
+        }
+      }
+
+      if (
+        dealType === "aluguel" &&
+        typeof minRent === "number" &&
+        typeof maxRent === "number"
+      ) {
+        const rentValue = row.listing?.price;
+        if (typeof rentValue !== "number" || rentValue < minRent || rentValue > maxRent) {
+          return false;
+        }
+      }
+
+      return true;
     });
   };
 
@@ -1203,21 +1271,23 @@ export default function CrmPage() {
       minParking,
       minAreaM2,
       maxAreaM2,
-      propertyTypes
+      propertyTypes,
+      dealType
     } =
       getListingFilters(override);
 
-    if (propertyTypes.length > 0) {
-      const listingType = listing.property_type ?? "";
-      if (!propertyTypes.includes(listingType as PropertyTypeValue)) {
-        return false;
-      }
+    if (dealType && listing.deal_type && listing.deal_type !== dealType) {
+      return false;
     }
 
-    const isLand = listing.property_type === "land";
-    if (!isLand && !passesMinOrZero(listing.bedrooms, minBedrooms)) return false;
-    if (!isLand && !passesMinOrZero(listing.bathrooms, minBathrooms)) return false;
-    if (!isLand && !passesMinOrZero(listing.parking, minParking)) return false;
+    if (propertyTypes.length > 0 && !matchesUnifiedPropertyFilter(listing, propertyTypes)) {
+      return false;
+    }
+
+    const isTerreno = isTerrenoListing(listing);
+    if (!isTerreno && !passesMinOrZero(listing.bedrooms, minBedrooms)) return false;
+    if (!isTerreno && !passesMinOrZero(listing.bathrooms, minBathrooms)) return false;
+    if (!isTerreno && !passesMinOrZero(listing.parking, minParking)) return false;
     if (!passesMinOrZero(listing.area_m2, minAreaM2)) return false;
     if (!passesMaxOrZero(listing.area_m2, maxAreaM2)) return false;
 
@@ -1355,7 +1425,7 @@ export default function CrmPage() {
     let listingQuery = supabase
       .from("listings")
       .select(
-        "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at"
+        "id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at"
       )
       .in("id", ids);
 
@@ -1930,7 +2000,7 @@ export default function CrmPage() {
 
     const closureType =
       statusModalTarget === "fechado" &&
-      (closedOutcome === "won" || closedOutcome === "lost")
+        (closedOutcome === "won" || closedOutcome === "lost")
         ? closedOutcome
         : null;
 
@@ -1968,14 +2038,14 @@ export default function CrmPage() {
     }
 
     setFilterError(null);
-    const selectWithExtendedColumns =
-      "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_area_m2, max_days_fresh, property_types";
+    const SELECT_FILTERS_FIELDS =
+      "id, org_id, client_id, active, min_price, max_price, min_rent, max_rent, neighborhoods, min_bedrooms, min_bathrooms, min_parking, min_area_m2, max_area_m2, max_days_fresh, property_types, deal_type";
     const selectBaseColumns =
       "id, org_id, client_id, active, min_price, max_price, neighborhoods, min_bedrooms, max_days_fresh, property_types";
 
     const primary = await supabase
       .from("client_filters")
-      .select(selectWithExtendedColumns)
+      .select(SELECT_FILTERS_FIELDS)
       .eq("client_id", clientId)
       .eq("org_id", organizationId)
       .maybeSingle();
@@ -2010,6 +2080,14 @@ export default function CrmPage() {
         typeof filter?.max_price === "number"
           ? formatThousandsBR(String(filter.max_price))
           : "",
+      min_rent:
+        typeof filter?.min_rent === "number"
+          ? formatThousandsBR(String(filter.min_rent))
+          : "",
+      max_rent:
+        typeof filter?.max_rent === "number"
+          ? formatThousandsBR(String(filter.max_rent))
+          : "",
       neighborhoods: Array.isArray(filter?.neighborhoods)
         ? filter?.neighborhoods.join(", ")
         : "",
@@ -2020,10 +2098,9 @@ export default function CrmPage() {
       max_area_m2: filter?.max_area_m2?.toString() ?? "",
       max_days_fresh: filter?.max_days_fresh?.toString() ?? "15",
       property_types: Array.isArray(filter?.property_types)
-        ? filter?.property_types
-          .filter((item) => PROPERTY_TYPE_SET.has(item as PropertyTypeValue))
-          .join(", ")
-        : ""
+        ? normalizeUnifiedPropertyCategories(filter.property_types).join(", ")
+        : "",
+      deal_type: filter?.deal_type ?? "venda"
     });
     setNeighborhoodInput("");
 
@@ -2047,7 +2124,7 @@ export default function CrmPage() {
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at)"
+        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at)"
       )
       .eq("org_id", organizationId)
       .eq("client_id", clientId)
@@ -2088,7 +2165,7 @@ export default function CrmPage() {
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at)"
+        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at)"
       )
       .eq("org_id", organizationId)
       .eq("client_id", clientId)
@@ -2130,7 +2207,7 @@ export default function CrmPage() {
     const { data, error } = await supabase
       .from("automated_matches")
       .select(
-        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at)"
+        "id, org_id, client_id, listing_id, seen, is_notified, created_at, listing:listing_id (id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at)"
       )
       .eq("org_id", organizationId)
       .eq("client_id", clientId)
@@ -2288,6 +2365,14 @@ export default function CrmPage() {
         typeof filter?.max_price === "number"
           ? formatThousandsBR(String(filter.max_price))
           : "",
+      min_rent:
+        typeof filter?.min_rent === "number"
+          ? formatThousandsBR(String(filter.min_rent))
+          : "",
+      max_rent:
+        typeof filter?.max_rent === "number"
+          ? formatThousandsBR(String(filter.max_rent))
+          : "",
       neighborhoods: Array.isArray(filter?.neighborhoods)
         ? filter?.neighborhoods.join(", ")
         : "",
@@ -2298,10 +2383,9 @@ export default function CrmPage() {
       max_area_m2: filter?.max_area_m2?.toString() ?? "",
       max_days_fresh: filter?.max_days_fresh?.toString() ?? "15",
       property_types: Array.isArray(filter?.property_types)
-        ? filter?.property_types
-          .filter((item) => PROPERTY_TYPE_SET.has(item as PropertyTypeValue))
-          .join(", ")
-        : ""
+        ? normalizeUnifiedPropertyCategories(filter.property_types).join(", ")
+        : "",
+      deal_type: filter?.deal_type ?? "venda"
     });
 
     setMatches(bundle.matches);
@@ -2373,7 +2457,7 @@ export default function CrmPage() {
           let listingQuery = supabase
             .from("listings")
             .select(
-              "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at"
+              "id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at"
             )
             .eq("id", newMatch.listing_id);
 
@@ -2602,6 +2686,9 @@ export default function CrmPage() {
   ) => {
     if (!organizationId) return;
     const { min, max } = getPriceRange(overrideFilter);
+    const { min: minRent, max: maxRent } = getRentRange(overrideFilter);
+    const activeDealType = overrideFilter.deal_type ?? "venda";
+    const priceColumn = activeDealType === "aluguel" ? "total_cost" : "price";
     if (typeof min !== "number" || typeof max !== "number") return;
     if (!Array.isArray(overrideFilter.neighborhoods) || overrideFilter.neighborhoods.length === 0) {
       return;
@@ -2618,23 +2705,25 @@ export default function CrmPage() {
       let query = supabase
         .from("listings")
         .select(
-          "id, title, price, neighborhood, bedrooms, bathrooms, parking, area_m2, property_type, url, main_image_url, published_at, first_seen_at"
+          "id, title, price, total_cost, neighborhood, bedrooms, bathrooms, parking, area_m2, deal_type, property_type, property_subtype, url, main_image_url, published_at, first_seen_at"
         )
-        .gte("price", min)
-        .lte("price", max)
+        .eq("deal_type", activeDealType)
+        .gte(priceColumn, min)
+        .lte(priceColumn, max)
         .or(`org_id.is.null,org_id.eq.${organizationId}`);
+
+      if (
+        activeDealType === "aluguel" &&
+        typeof minRent === "number" &&
+        typeof maxRent === "number"
+      ) {
+        query = query.gte("price", minRent).lte("price", maxRent);
+      }
 
       if (normalizedNeighborhoods.length > 0) {
         query = query.in("neighborhood_normalized", normalizedNeighborhoods);
       } else {
         query = query.in("neighborhood", overrideFilter.neighborhoods);
-      }
-
-      if (
-        Array.isArray(overrideFilter.property_types) &&
-        overrideFilter.property_types.length > 0
-      ) {
-        query = query.in("property_type", overrideFilter.property_types);
       }
 
       return query;
@@ -2736,6 +2825,8 @@ export default function CrmPage() {
     const propertyTypes = selectedPropertyTypes;
     const minPrice = parseBRNumber(filterDraft.min_price);
     const maxPrice = parseBRNumber(filterDraft.max_price);
+    const minRent = parseBRNumber(filterDraft.min_rent);
+    const maxRent = parseBRNumber(filterDraft.max_rent);
 
     if (neighborhoods.length === 0) {
       setFilterError("Bairro é obrigatório");
@@ -2755,6 +2846,21 @@ export default function CrmPage() {
       return;
     }
 
+    if ((filterDraft.deal_type || "venda") === "aluguel") {
+      const filledMinRent = typeof minRent === "number";
+      const filledMaxRent = typeof maxRent === "number";
+      if (filledMinRent !== filledMaxRent) {
+        setFilterError("Preencha aluguel mínimo e máximo");
+        setFilterSaving(false);
+        return;
+      }
+      if (filledMinRent && filledMaxRent && minRent > maxRent) {
+        setFilterError("Aluguel mínimo não pode ser maior que máximo");
+        setFilterSaving(false);
+        return;
+      }
+    }
+
     const minBedrooms = parseMinInput(filterDraft.min_bedrooms);
     const minBathrooms = parseMinInput(filterDraft.min_bathrooms);
     const minParking = parseMinInput(filterDraft.min_parking);
@@ -2766,8 +2872,21 @@ export default function CrmPage() {
       org_id: organizationId,
       client_id: selectedClientId,
       active: filterDraft.active,
+      deal_type: filterDraft.deal_type,
       min_price: minPrice,
       max_price: maxPrice,
+      min_rent:
+        (filterDraft.deal_type || "venda") === "aluguel" &&
+          typeof minRent === "number" &&
+          typeof maxRent === "number"
+          ? minRent
+          : null,
+      max_rent:
+        (filterDraft.deal_type || "venda") === "aluguel" &&
+          typeof minRent === "number" &&
+          typeof maxRent === "number"
+          ? maxRent
+          : null,
       neighborhoods,
       min_bedrooms: minBedrooms ?? null,
       max_days_fresh: maxDaysFresh,
@@ -2786,22 +2905,27 @@ export default function CrmPage() {
       .upsert(extendedPayload, { onConflict: "client_id" });
 
     if (error && isMissingColumnError(error.message)) {
+      const payloadWithoutRentColumns = sanitizeFilterPayload({
+        ...extendedPayload,
+        min_rent: undefined,
+        max_rent: undefined
+      });
       const fallback = await supabase
         .from("client_filters")
-        .upsert(
-          sanitizeFilterPayload({
-            ...basePayload,
-            min_bathrooms: minBathrooms ?? null,
-            min_parking: minParking ?? null
-          }),
-          { onConflict: "client_id" }
-        );
+        .upsert(payloadWithoutRentColumns, { onConflict: "client_id" });
       error = fallback.error;
 
       if (error && isMissingColumnError(error.message)) {
         const legacyFallback = await supabase
           .from("client_filters")
-          .upsert(basePayload, { onConflict: "client_id" });
+          .upsert(
+            sanitizeFilterPayload({
+              ...basePayload,
+              min_rent: undefined,
+              max_rent: undefined
+            }),
+            { onConflict: "client_id" }
+          );
         error = legacyFallback.error;
       }
     }
@@ -2813,8 +2937,21 @@ export default function CrmPage() {
         org_id: organizationId,
         client_id: selectedClientId,
         active: filterDraft.active,
+        deal_type: filterDraft.deal_type,
         min_price: minPrice,
         max_price: maxPrice,
+        min_rent:
+          (filterDraft.deal_type || "venda") === "aluguel" &&
+            typeof minRent === "number" &&
+            typeof maxRent === "number"
+            ? minRent
+            : null,
+        max_rent:
+          (filterDraft.deal_type || "venda") === "aluguel" &&
+            typeof minRent === "number" &&
+            typeof maxRent === "number"
+            ? maxRent
+            : null,
         neighborhoods,
         min_bedrooms: minBedrooms,
         min_bathrooms: minBathrooms,
@@ -3160,33 +3297,51 @@ export default function CrmPage() {
           </div>
         </Card>
 
-        <div className="min-w-0 space-y-6">
-          <Card className="panel space-y-4">
-            <div>
-              <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                Detalhes do cliente
-              </p>
-              <h3 className="mt-2 text-lg font-semibold">
-                {selectedClient?.name || (isCrmEmptyState ? "Nenhum cliente cadastrado" : "Selecione um cliente")}
-              </h3>
-            </div>
+        <div className="min-w-0 space-y-6 xl:grid xl:grid-cols-[minmax(0,1.55fr)_340px] xl:items-start xl:gap-6 xl:space-y-0">
+          <div className="grid gap-6 xl:col-span-2 xl:grid-cols-[minmax(0,1.8fr)_320px] xl:items-start">
+            <Card className="panel space-y-5 p-5 sm:p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                    Detalhes do cliente
+                  </p>
+                  <h3 className="mt-2 text-lg font-semibold text-zinc-50 sm:text-xl">
+                    {selectedClient?.name ||
+                      (isCrmEmptyState ? "Nenhum cliente cadastrado" : "Selecione um cliente")}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-2 rounded-full border border-zinc-800 bg-black/40 px-3 py-1.5 text-xs text-zinc-300">
+                  <span className="text-zinc-500">Pipeline</span>
+                  <span className="font-semibold text-white">{displayIndex + 1}</span>
+                  <span className="text-zinc-500">/ {PIPELINE_STEPS.length}</span>
+                </div>
+              </div>
 
-            <div className="space-y-3">
-              <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                Pipeline
-              </p>
-              <div className="rounded-xl border border-zinc-800 bg-black/50 p-3">
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-500">
-                  <span>Etapa atual: {getStatusLabel(confirmedPipelineStatus)}</span>
-                  <div className="flex min-w-0 flex-wrap items-center gap-3 text-zinc-400">
+              <div className="space-y-4 rounded-2xl bg-gradient-to-b from-white/[0.04] to-white/[0.01] p-4 ring-1 ring-white/5 sm:p-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1.5">
+                    <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">Pipeline</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-base font-semibold text-zinc-100 sm:text-lg">
+                        {getStatusLabel(confirmedPipelineStatus)}
+                      </h4>
+                      <span className="rounded-full border border-zinc-700 bg-black/30 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-zinc-300">
+                        Etapa atual
+                      </span>
+                    </div>
+                    <p className="max-w-3xl text-sm leading-relaxed text-zinc-400">
+                      {PIPELINE_STATUS_HELP[displayPipelineStatus]}
+                    </p>
+                  </div>
+
+                  <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-xs text-zinc-400">
                     {statusModalOpen && pendingIndex !== null ? (
-                      <span>
-                        Selecionado:{" "}
-                        {PIPELINE_STEPS[pendingIndex]?.label ?? "Etapa pendente"}
+                      <span className="rounded-full border border-zinc-800 bg-black/30 px-2.5 py-1">
+                        Selecionado: {PIPELINE_STEPS[pendingIndex]?.label ?? "Etapa pendente"}
                       </span>
                     ) : null}
                     {confirmedPipelineStatus === "fechado" ? (
-                      <span className="text-zinc-300">
+                      <span className="rounded-full border border-zinc-700 bg-black/40 px-2.5 py-1 text-zinc-200">
                         {selectedClient?.closed_outcome === "won"
                           ? "Fechado (Ganho)"
                           : selectedClient?.closed_outcome === "lost"
@@ -3198,32 +3353,35 @@ export default function CrmPage() {
                 </div>
 
                 {!isCreatingClient && selectedClient ? (
-                  <div className="mb-3 grid gap-2 rounded-xl border border-zinc-800 bg-black/60 px-3 py-2 text-xs text-zinc-400 md:grid-cols-2">
+                  <div className="grid gap-2 rounded-2xl border border-zinc-800/80 bg-black/30 p-3 text-sm text-zinc-300 sm:grid-cols-2 xl:grid-cols-4">
                     {getStageDateRows(selectedClient).map((row) => (
-                      <p key={`selected-${row.label}`}>
-                        <span className="text-zinc-500">{row.label}:</span> {row.value}
-                      </p>
+                      <div
+                        key={`selected-${row.label}`}
+                        className="rounded-xl border border-zinc-800/60 bg-black/30 px-3 py-2"
+                      >
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-500">
+                          {row.label}
+                        </p>
+                        <p className="mt-1 text-sm text-zinc-100">{row.value}</p>
+                      </div>
                     ))}
                   </div>
                 ) : null}
-                <p className="mb-3 text-[11px] text-zinc-500">
-                  {PIPELINE_STATUS_HELP[displayPipelineStatus]}
-                </p>
 
-                <div className="space-y-3 lg:hidden">
-                  <div className="flex items-start justify-between gap-3 rounded-xl border border-zinc-800 bg-black/60 p-3">
+                <div className="space-y-4 lg:hidden">
+                  <div className="flex items-start justify-between gap-3 rounded-2xl border border-zinc-800 bg-black/40 p-4">
                     <div>
-                      <p className="text-[11px] text-zinc-500">Etapa atual</p>
-                      <p className="mt-1 text-sm font-semibold text-zinc-100">
+                      <p className="text-xs text-zinc-500">Etapa atual</p>
+                      <p className="mt-1 text-base font-semibold text-zinc-100">
                         {getStatusLabel(displayPipelineStatus)}
                       </p>
                     </div>
-                    <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300">
+                    <span className="rounded-full border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-300">
                       {displayIndex + 1}/{PIPELINE_STEPS.length}
                     </span>
                   </div>
 
-                  <div className="relative h-2 overflow-hidden rounded-full bg-zinc-800/90">
+                  <div className="relative h-2.5 overflow-hidden rounded-full bg-zinc-800/90">
                     <motion.div
                       className="absolute inset-y-0 left-0 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.45)]"
                       animate={{ width: `${pipelineProgressPercent}%` }}
@@ -3261,11 +3419,11 @@ export default function CrmPage() {
                   </div>
                 </div>
 
-                <div ref={pipelineChipsRef} className="relative hidden pb-6 pt-1 lg:block">
+                <div ref={pipelineChipsRef} className="relative hidden pb-8 pt-3 lg:block">
                   {pipelineTrack.ready ? (
                     <>
                       <div
-                        className="pointer-events-none absolute z-0 h-1 rounded-full bg-zinc-800/90"
+                        className="pointer-events-none absolute z-0 h-1.5 rounded-full bg-zinc-800/90"
                         style={{
                           left: pipelineTrack.start,
                           top: pipelineTrack.top,
@@ -3273,7 +3431,7 @@ export default function CrmPage() {
                         }}
                       />
                       <motion.div
-                        className="pointer-events-none absolute z-0 h-1 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.35)]"
+                        className="pointer-events-none absolute z-0 h-1.5 rounded-full bg-white shadow-[0_0_14px_rgba(255,255,255,0.35)]"
                         animate={{
                           left: pipelineTrack.start,
                           top: pipelineTrack.top,
@@ -3282,7 +3440,7 @@ export default function CrmPage() {
                         transition={{ type: "spring", stiffness: 170, damping: 24 }}
                       />
                       <motion.span
-                        className="pointer-events-none absolute z-0 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-zinc-900 bg-white shadow-[0_0_14px_rgba(255,255,255,0.65)]"
+                        className="pointer-events-none absolute z-0 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-zinc-900 bg-white shadow-[0_0_16px_rgba(255,255,255,0.65)]"
                         animate={{
                           left: pipelineTrack.start + pipelineTrack.fill,
                           top: pipelineTrack.top + 0.5
@@ -3292,7 +3450,7 @@ export default function CrmPage() {
                     </>
                   ) : null}
 
-                  <div className="relative z-10 grid grid-cols-7 gap-2">
+                  <div className="relative z-10 grid grid-cols-7 gap-3">
                     {PIPELINE_STEPS.map((step) => {
                       const stepIndex = PIPELINE_INDEX_BY_STATUS[step.value];
                       const isCompleted = stepIndex < displayIndex;
@@ -3312,207 +3470,267 @@ export default function CrmPage() {
                             !selectedClientId
                           }
                           aria-current={isActive ? "step" : undefined}
-                          className={`min-h-[58px] min-w-0 rounded-xl border px-2.5 py-2 text-center text-[10px] font-semibold leading-tight transition accent-focus focus-visible:outline-none ${isActive
-                            ? "accent-fill accent-sheen text-zinc-50"
+                          className={`min-h-[74px] min-w-0 rounded-2xl border px-3 py-3 text-center text-[11px] font-semibold leading-tight transition accent-focus focus-visible:outline-none ${isActive
+                            ? "accent-fill accent-sheen text-zinc-50 shadow-[0_10px_30px_rgba(255,255,255,0.08)]"
                             : isCompleted
                               ? "accent-fill-subtle text-sky-100"
                               : "accent-outline text-zinc-300 hover:text-zinc-100"
                             }`}
                         >
-                          {step.label}
+                          <span className="block">
+                            {step.label}
+                          </span>
                         </button>
                       );
                     })}
                   </div>
                 </div>
               </div>
-            </div>
+            </Card>
 
-            {isCrmEmptyState ? (
-              <div className="rounded-xl border border-zinc-800 bg-black/40 p-4">
-                <p className="text-sm text-zinc-300">
-                  Você ainda não possui clientes cadastrados no CRM.
-                </p>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="mt-3 w-full sm:w-auto"
-                  onClick={openCreateClientForm}
-                  disabled={isResultOverlayVisible}
-                >
-                  Criar cliente
-                </Button>
-              </div>
-            ) : !selectedClient ? (
-              <div className="rounded-xl border border-zinc-800 bg-black/40 p-4">
-                <p className="text-sm text-zinc-300">
-                  Selecione um cliente na lista para visualizar os detalhes.
-                </p>
-              </div>
-            ) : (
-              <>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Nome</p>
-                    <p className="mt-1 text-sm text-zinc-100">{selectedClient.name || "—"}</p>
-                  </div>
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Email</p>
-                    <p className="mt-1 text-sm text-zinc-100">
-                      {selectedClient.contact_info?.email || "—"}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Telefone</p>
-                    <p className="mt-1 text-sm text-zinc-100">
-                      {selectedClient.contact_info?.phone || "—"}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Próxima ação</p>
-                    <p className="mt-1 text-sm text-zinc-100">
-                      {formatDateTimeDisplay(resolveClientNextActionAt(selectedClient))}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-zinc-800 bg-black/40 px-3 py-2 md:col-span-2">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-500">Descrição / contexto</p>
-                    <p className="mt-1 text-sm text-zinc-100">
-                      {selectedClient.descricao_contexto || "—"}
-                    </p>
-                  </div>
-                </div>
-
-                {clientError ? (
-                  <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                    {clientError}
-                  </p>
-                ) : null}
-
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    onClick={openEditClientForm}
-                    disabled={isResultOverlayVisible}
-                  >
-                    Editar
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
-                    onClick={handleRemoveClient}
-                  >
-                    Remover Cliente
-                  </Button>
-                </div>
-              </>
-            )}
-          </Card>
-
-          {selectedClientId ? (
-            <Card className="space-y-4">
+            <Card className="panel space-y-4 p-4 xl:p-5">
               <div>
                 <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                  Histórico
+                  Dados do cliente
                 </p>
-                <h3 className="mt-2 text-lg font-semibold">Timeline do CRM</h3>
+                <h3 className="mt-1 text-base font-semibold text-zinc-100">Resumo</h3>
               </div>
 
-              {timelineError ? (
+              {isCrmEmptyState ? (
+                <div className="rounded-xl border border-zinc-800 bg-black/30 p-4">
+                  <p className="text-sm text-zinc-300">
+                    Você ainda não possui clientes cadastrados no CRM.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="mt-3 w-full"
+                    onClick={openCreateClientForm}
+                    disabled={isResultOverlayVisible}
+                  >
+                    Criar cliente
+                  </Button>
+                </div>
+              ) : !selectedClient ? (
+                <div className="rounded-xl border border-zinc-800 bg-black/30 p-4">
+                  <p className="text-sm text-zinc-300">
+                    Selecione um cliente na lista para visualizar os detalhes.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="grid gap-2">
+                    <div className="rounded-xl border border-zinc-800/90 bg-black/25 px-3 py-2.5">
+                      <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Nome</p>
+                      <p className="mt-1 text-sm text-zinc-100">{selectedClient.name || "—"}</p>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800/90 bg-black/25 px-3 py-2.5">
+                      <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Email</p>
+                      <p className="mt-1 break-all text-sm text-zinc-100">
+                        {selectedClient.contact_info?.email || "—"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800/90 bg-black/25 px-3 py-2.5">
+                      <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                        Telefone
+                      </p>
+                      <p className="mt-1 text-sm text-zinc-100">
+                        {selectedClient.contact_info?.phone || "—"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800/90 bg-black/25 px-3 py-2.5">
+                      <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                        Próxima ação
+                      </p>
+                      <p className="mt-1 text-sm text-zinc-100">
+                        {formatDateTimeDisplay(resolveClientNextActionAt(selectedClient))}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800/90 bg-black/25 px-3 py-2.5">
+                      <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                        Descrição / contexto
+                      </p>
+                      <p
+                        className="mt-1 text-sm text-zinc-100"
+                        style={{
+                          display: "-webkit-box",
+                          WebkitLineClamp: 4,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden"
+                        }}
+                      >
+                        {selectedClient.descricao_contexto || "—"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {clientError ? (
+                    <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                      {clientError}
+                    </p>
+                  ) : null}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      onClick={openEditClientForm}
+                      disabled={isResultOverlayVisible}
+                    >
+                      Editar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                      onClick={handleRemoveClient}
+                    >
+                      Remover Cliente
+                    </Button>
+                  </div>
+                </>
+              )}
+            </Card>
+          </div>
+
+          {selectedClientId ? (
+            <Card className="space-y-4 p-4 xl:col-start-2 xl:row-start-3 xl:p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+                    Arquivados
+                  </p>
+                  <h3 className="mt-1 text-base font-semibold">Imóveis guardados</h3>
+                </div>
+                <Button
+                  variant="ghost"
+                  disabled={!archivedHasMore || archivedLoading}
+                  onClick={() => {
+                    const nextPage = archivedPage + 1;
+                    setArchivedPage(nextPage);
+                    fetchArchived(selectedClientId, nextPage);
+                  }}
+                >
+                  Carregar mais
+                </Button>
+              </div>
+
+              {matchesError ? (
                 <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                  {timelineError}
+                  {matchesError}
                 </p>
               ) : null}
 
-              {timelineLoading && timelineEvents.length === 0 ? (
-                <div className="h-24 rounded-xl border border-zinc-800 bg-white/5 animate-pulse" />
+              {archivedLoading && archived.length === 0 ? (
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                  <div className="h-40 rounded-2xl border border-zinc-800 bg-white/5 animate-pulse" />
+                  <div className="h-40 rounded-2xl border border-zinc-800 bg-white/5 animate-pulse" />
+                </div>
               ) : null}
 
-              {!timelineLoading && timelineEvents.length === 0 ? (
-                <p className="text-sm text-zinc-500">
-                  Sem eventos ainda para este cliente.
-                </p>
+              {archived.length === 0 && !archivedLoading ? (
+                <p className="text-sm text-zinc-500">Nenhum imóvel guardado para este cliente.</p>
               ) : null}
 
-              <div className="space-y-3">
-                {timelineEvents.map((event) => {
-                  const payload =
-                    event.payload && typeof event.payload === "object"
-                      ? (event.payload as TimelinePayload)
-                      : null;
-
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 xl:max-h-[420px] xl:overflow-y-auto xl:pr-1">
+                {archived.map((match) => {
+                  const listing = match.listing;
+                  const title = truncateWords(listing?.title || "Listing", 12);
+                  const listingPrice =
+                    listing?.deal_type === "aluguel"
+                      ? formatCurrency(listing?.total_cost ?? listing?.price ?? null)
+                      : formatCurrency(listing?.price ?? null);
                   return (
                     <div
-                      key={event.id}
-                      className="rounded-xl border border-zinc-800 bg-black/50 px-4 py-3"
+                      key={match.id}
+                      className="overflow-hidden rounded-2xl border border-zinc-800 bg-black/40"
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-medium text-zinc-100">
-                            {event.from_status ? getStatusLabel(event.from_status) : "—"} →{" "}
-                            {event.to_status ? getStatusLabel(event.to_status) : "—"}
-                          </p>
-                          <p className="text-xs text-zinc-500">
-                            {formatDateTimeDisplay(event.created_at)}
-                          </p>
-                          {event.actor_user_id ? (
-                            <p className="text-[11px] text-zinc-600">
-                              Usuário: {event.actor_user_id}
+                      <div className="relative h-32 border-b border-zinc-800 bg-black/50">
+                        {listing?.main_image_url ? (
+                          <Image
+                            src={listing.main_image_url}
+                            alt={listing?.title || "Imóvel guardado"}
+                            fill
+                            sizes="(max-width: 768px) 100vw, (max-width: 1280px) 45vw, 340px"
+                            className="object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full items-center justify-center text-[10px] uppercase tracking-[0.3em] text-zinc-600">
+                            Sem imagem
+                          </div>
+                        )}
+                        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/90 to-transparent" />
+                        <div className="absolute inset-x-2 bottom-2 flex flex-wrap gap-1.5">
+                          <span className="rounded-full border border-zinc-700/90 bg-black/70 px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-zinc-100">
+                            {getPropertyTypeLabel(listing)}
+                          </span>
+                          {listing?.deal_type ? (
+                            <span className="rounded-full border border-zinc-700/90 bg-black/70 px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-zinc-300">
+                              {listing.deal_type}
+                            </span>
+                          ) : null}
+                          <span className="rounded-full border border-zinc-700/90 bg-black/70 px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-zinc-300">
+                            {getPortalLabel(listing)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-zinc-100" title={listing?.title || "Listing"}>
+                              {title}
                             </p>
+                            <p className="mt-1 text-xs text-zinc-500">{getNeighborhood(listing)}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-semibold text-zinc-100">{listingPrice}</p>
+                            <p className="mt-1 text-[10px] text-zinc-500">
+                              Guardado em {formatDateDisplay(match.created_at)}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 text-[11px] text-zinc-400">
+                          {typeof listing?.bedrooms === "number" ? (
+                            <span className="rounded-full border border-zinc-800 bg-black/30 px-2.5 py-1">
+                              {listing.bedrooms}q
+                            </span>
+                          ) : null}
+                          {typeof listing?.bathrooms === "number" ? (
+                            <span className="rounded-full border border-zinc-800 bg-black/30 px-2.5 py-1">
+                              {listing.bathrooms}b
+                            </span>
+                          ) : null}
+                          {typeof listing?.parking === "number" ? (
+                            <span className="rounded-full border border-zinc-800 bg-black/30 px-2.5 py-1">
+                              {listing.parking}v
+                            </span>
+                          ) : null}
+                          {typeof listing?.area_m2 === "number" ? (
+                            <span className="rounded-full border border-zinc-800 bg-black/30 px-2.5 py-1">
+                              {listing.area_m2} m²
+                            </span>
                           ) : null}
                         </div>
-                        <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-zinc-400">
-                          {event.event_type}
-                        </span>
-                      </div>
 
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-400">
-                        {payload?.next_action ? (
-                          <span className="accent-fill-subtle rounded-full px-2 py-1">
-                            Próxima ação: {getNextActionLabel(payload.next_action)}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs text-zinc-500">
+                            Status: guardado
                           </span>
-                        ) : null}
-                        {payload?.next_action_at || payload?.next_followup_at ? (
-                          <span className="accent-fill-subtle rounded-full px-2 py-1">
-                            Próxima ação em:{" "}
-                            {formatDateTimeDisplay(
-                              payload.next_action_at ?? payload.next_followup_at
-                            )}
-                          </span>
-                        ) : null}
-                        {payload?.chase_due_at ? (
-                          <span className="accent-fill-subtle rounded-full px-2 py-1">
-                            Cobrar em: {formatDateTimeDisplay(payload.chase_due_at)}
-                          </span>
-                        ) : null}
-                        {payload?.last_contact_at ? (
-                          <span className="accent-fill-subtle rounded-full px-2 py-1">
-                            Contato em: {formatDateTimeDisplay(payload.last_contact_at)}
-                          </span>
-                        ) : null}
-                        {payload?.last_reply_at ? (
-                          <span className="accent-fill-subtle rounded-full px-2 py-1">
-                            Respondeu em: {formatDateTimeDisplay(payload.last_reply_at)}
-                          </span>
-                        ) : null}
-                        {payload?.closed_outcome ? (
-                          <span className="accent-fill-subtle rounded-full px-2 py-1">
-                            Resultado:{" "}
-                            {payload.closed_outcome === "won"
-                              ? "Ganho"
-                              : "Perdido"}
-                          </span>
-                        ) : null}
-                        {payload?.lost_reason ? (
-                          <span className="accent-fill-subtle rounded-full px-2 py-1">
-                            Motivo perda: {getLostReasonLabel(payload.lost_reason)}
-                          </span>
-                        ) : null}
+                          {listing?.url ? (
+                            <a
+                              href={listing.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs text-zinc-300 underline underline-offset-4"
+                            >
+                              Abrir anúncio
+                            </a>
+                          ) : (
+                            <span className="text-xs text-zinc-500">Sem link</span>
+                          )}
+                        </div>
                       </div>
-
-                      {payload?.note ? (
-                        <p className="mt-2 text-xs text-zinc-300">{payload.note}</p>
-                      ) : null}
                     </div>
                   );
                 })}
@@ -3521,12 +3739,12 @@ export default function CrmPage() {
           ) : null}
 
           {selectedClientId ? (
-            <Card className="space-y-4">
+            <Card className="space-y-3 p-4 xl:col-start-2 xl:row-start-2 xl:flex xl:max-h-[calc(100vh-7.5rem)] xl:flex-col xl:overflow-hidden">
               <div>
                 <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
                   Filtros
                 </p>
-                <h3 className="mt-2 text-lg font-semibold">Preferências</h3>
+                <h3 className="mt-1 text-base font-semibold">Preferências</h3>
               </div>
 
               {filterError ? (
@@ -3535,220 +3753,382 @@ export default function CrmPage() {
                 </p>
               ) : null}
 
-              <div className="flex items-center gap-3 text-sm text-zinc-300">
-                <input
-                  type="checkbox"
-                  checked={filterDraft.active}
-                  onChange={(event) =>
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      active: event.target.checked
-                    }))
-                  }
-                />
-                <span>Filtro ativo</span>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <Input
-                  type="text"
-                  placeholder="Preço mín."
-                  value={filterDraft.min_price}
-                  onChange={(event) => {
-                    const formatted = formatThousandsBR(event.target.value);
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      min_price: formatted
-                    }));
-                  }}
-                />
-                <Input
-                  type="text"
-                  placeholder="Preço máx."
-                  value={filterDraft.max_price}
-                  onChange={(event) => {
-                    const formatted = formatThousandsBR(event.target.value);
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      max_price: formatted
-                    }));
-                  }}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <NeighborhoodAutocomplete
-                  label="Bairro"
-                  placeholder="Digite para buscar bairros"
-                  city="Campinas"
-                  organizationId={organizationId}
-                  value={neighborhoodInput}
-                  onChange={setNeighborhoodInput}
-                  onSelect={(item) => {
-                    addNeighborhood(item.name);
-                    setNeighborhoodInput("");
-                  }}
-                  onClear={() => {
-                    setNeighborhoodInput("");
-                    setNeighborhoodList([]);
-                  }}
-                />
-
-                {selectedNeighborhoods.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {selectedNeighborhoods.map((item) => (
-                      <span
-                        key={item}
-                        className="inline-flex items-center gap-2 rounded-full accent-badge px-3 py-1 text-xs text-zinc-200"
-                      >
-                        {item}
-                        <button
-                          type="button"
-                          onClick={() => removeNeighborhood(item)}
-                          className="rim-core rim-secondary inline-flex h-5 w-5 items-center justify-center rounded-full p-0 text-zinc-300 transition hover:text-zinc-100 focus-visible:outline-none [--rim-size:1.5px]"
-                          aria-label={`Remover bairro ${item}`}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
+              <div className="space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
+                <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-3.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="flex items-center gap-3 text-sm text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={filterDraft.active}
+                        onChange={(event) =>
+                          setFilterDraft((prev) => ({
+                            ...prev,
+                            active: event.target.checked
+                          }))
+                        }
+                      />
+                      <span>Filtro ativo</span>
+                    </label>
+                    <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                      CRM
+                    </span>
                   </div>
-                ) : (
-                  <p className="text-xs text-zinc-500">
-                    Nenhum bairro selecionado.
-                  </p>
-                )}
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="Quartos mín."
-                  value={filterDraft.min_bedrooms}
-                  onChange={(event) =>
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      min_bedrooms: event.target.value
-                    }))
-                  }
-                />
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="Banheiros mín."
-                  value={filterDraft.min_bathrooms}
-                  onChange={(event) =>
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      min_bathrooms: event.target.value
-                    }))
-                  }
-                />
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="Vagas mín."
-                  value={filterDraft.min_parking}
-                  onChange={(event) =>
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      min_parking: event.target.value
-                    }))
-                  }
-                />
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="Área mín. (m2)"
-                  value={filterDraft.min_area_m2}
-                  onChange={(event) =>
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      min_area_m2: event.target.value
-                    }))
-                  }
-                />
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="Área máx. (m2)"
-                  value={filterDraft.max_area_m2}
-                  onChange={(event) =>
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      max_area_m2: event.target.value
-                    }))
-                  }
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label htmlFor="crm-fresh-days" className="text-xs text-zinc-500">
-                  Buscar imóveis dos últimos
-                </label>
-                <select
-                  id="crm-fresh-days"
-                  value={filterDraft.max_days_fresh}
-                  onChange={(event) =>
-                    setFilterDraft((prev) => ({
-                      ...prev,
-                      max_days_fresh: event.target.value
-                    }))
-                  }
-                  className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
-                >
-                  {FRESHNESS_OPTIONS.map((option) => (
-                    <option key={option.label} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-zinc-500">
-                  Buscar imóveis dos últimos: 7/15/30 dias (ou todos).
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <p className="text-xs text-zinc-500">Tipo de imóvel</p>
-                <div className="flex flex-wrap gap-2">
-                  {PROPERTY_TYPE_OPTIONS.map((option) => {
-                    const selected = selectedPropertyTypes.includes(option.value);
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        aria-pressed={selected}
-                        onClick={() => togglePropertyType(option.value)}
-                        className={`rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] transition accent-focus focus-visible:outline-none ${selected
-                          ? "accent-fill accent-sheen text-zinc-50"
-                          : "accent-outline text-zinc-300 hover:text-zinc-100"
-                          }`}
-                      >
-                        {option.label}
-                      </button>
-                    );
-                  })}
                 </div>
-              </div>
 
-              <Button
-                onClick={handleSaveFilters}
-                disabled={filterSaving}
-              >
-                {filterSaving ? "Salvando..." : "Salvar filtros"}
-              </Button>
+                <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-3.5">
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="crm-fresh-days"
+                      className="text-xs font-medium text-zinc-400"
+                    >
+                      Dias frescos
+                    </label>
+                    <select
+                      id="crm-fresh-days"
+                      value={filterDraft.max_days_fresh}
+                      onChange={(event) =>
+                        setFilterDraft((prev) => ({
+                          ...prev,
+                          max_days_fresh: event.target.value
+                        }))
+                      }
+                      className="w-full appearance-none rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 accent-focus accent-control focus:outline-none"
+                    >
+                      {FRESHNESS_OPTIONS.map((option) => (
+                        <option key={option.label} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-3.5">
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-zinc-400">
+                      Tipo de negocio
+                    </label>
+                    <div className="rounded-xl border border-zinc-800 bg-black/30 p-1">
+                      <div className="grid grid-cols-2 gap-1">
+                        {DEAL_TYPE_OPTIONS.map((option) => {
+                          const active =
+                            (filterDraft.deal_type || "venda") === option.value;
+                          return (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() =>
+                                setFilterDraft((prev) => ({
+                                  ...prev,
+                                  deal_type: option.value as "venda" | "aluguel"
+                                }))
+                              }
+                              className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition ${active
+                                ? "is-active-fixed bg-surface-lifted text-white shadow-[0_0_0_1px_rgba(255,255,255,0.08)]"
+                                : "text-zinc-400 hover:bg-white/5 hover:text-white"
+                                }`}
+                              aria-pressed={active}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-3.5 space-y-2">
+                  <NeighborhoodAutocomplete
+                    label="Bairro"
+                    placeholder="Digite para buscar bairros"
+                    city="Campinas"
+                    organizationId={organizationId}
+                    value={neighborhoodInput}
+                    onChange={setNeighborhoodInput}
+                    onSelect={(item) => {
+                      addNeighborhood(item.name);
+                      setNeighborhoodInput("");
+                    }}
+                    onClear={() => {
+                      setNeighborhoodInput("");
+                      setNeighborhoodList([]);
+                    }}
+                  />
+
+                  {selectedNeighborhoods.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {selectedNeighborhoods.map((item) => (
+                        <span
+                          key={item}
+                          className="inline-flex items-center gap-2 rounded-full accent-badge px-3 py-1 text-xs text-zinc-200"
+                        >
+                          {item}
+                          <button
+                            type="button"
+                            onClick={() => removeNeighborhood(item)}
+                            className="rim-core rim-secondary inline-flex h-5 w-5 items-center justify-center rounded-full p-0 text-zinc-300 transition hover:text-zinc-100 focus-visible:outline-none [--rim-size:1.5px]"
+                            aria-label={`Remover bairro ${item}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-zinc-500">
+                      Nenhum bairro selecionado.
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-4 space-y-3">
+                  <p className="text-xs font-medium text-zinc-400">Tipo de imóvel</p>
+                  <PropertyCategoryMultiSelect
+                    value={selectedPropertyTypes}
+                    onChange={setPropertyTypeList}
+                    placeholder="Tipo de imóvel"
+                  />
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-4 space-y-3">
+                  <p className="text-xs font-medium text-zinc-400">
+                    {(filterDraft.deal_type || "venda") === "aluguel"
+                      ? "Valores de aluguel"
+                      : "Faixa de preco"}
+                  </p>
+
+                  {(filterDraft.deal_type || "venda") === "aluguel" ? (
+                    <div className="space-y-3">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <label className="text-xs text-zinc-500">
+                            Aluguel minimo
+                          </label>
+                          <Input
+                            type="text"
+                            placeholder="Aluguel minimo"
+                            value={filterDraft.min_rent}
+                            onChange={(event) => {
+                              const formatted = formatThousandsBR(event.target.value);
+                              setFilterDraft((prev) => ({
+                                ...prev,
+                                min_rent: formatted
+                              }));
+                            }}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs text-zinc-500">
+                            Aluguel maximo
+                          </label>
+                          <Input
+                            type="text"
+                            placeholder="Aluguel maximo"
+                            value={filterDraft.max_rent}
+                            onChange={(event) => {
+                              const formatted = formatThousandsBR(event.target.value);
+                              setFilterDraft((prev) => ({
+                                ...prev,
+                                max_rent: formatted
+                              }));
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <label className="text-xs text-zinc-500">
+                            Preco total minimo
+                          </label>
+                          <Input
+                            type="text"
+                            placeholder="Preco total minimo"
+                            value={filterDraft.min_price}
+                            onChange={(event) => {
+                              const formatted = formatThousandsBR(event.target.value);
+                              setFilterDraft((prev) => ({
+                                ...prev,
+                                min_price: formatted
+                              }));
+                            }}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs text-zinc-500">
+                            Preco total maximo
+                          </label>
+                          <Input
+                            type="text"
+                            placeholder="Preco total maximo"
+                            value={filterDraft.max_price}
+                            onChange={(event) => {
+                              const formatted = formatThousandsBR(event.target.value);
+                              setFilterDraft((prev) => ({
+                                ...prev,
+                                max_price: formatted
+                              }));
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-zinc-500">Preco minimo</label>
+                        <Input
+                          type="text"
+                          placeholder="Preco minimo"
+                          value={filterDraft.min_price}
+                          onChange={(event) => {
+                            const formatted = formatThousandsBR(event.target.value);
+                            setFilterDraft((prev) => ({
+                              ...prev,
+                              min_price: formatted
+                            }));
+                          }}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-zinc-500">Preco maximo</label>
+                        <Input
+                          type="text"
+                          placeholder="Preco maximo"
+                          value={filterDraft.max_price}
+                          onChange={(event) => {
+                            const formatted = formatThousandsBR(event.target.value);
+                            setFilterDraft((prev) => ({
+                              ...prev,
+                              max_price: formatted
+                            }));
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800/90 bg-black/20 p-4 space-y-4">
+                  <p className="text-xs font-medium text-zinc-400">
+                    Caracteristicas minimas
+                  </p>
+
+                  <div className="grid gap-4">
+                    <div className="grid gap-x-3 gap-y-4 md:grid-cols-3">
+                      <div className="grid content-start gap-2">
+                        <label className="min-h-8 text-xs leading-4 text-zinc-500">
+                          Quartos min.
+                        </label>
+                        <Input
+                          className="h-10 px-3.5"
+                          type="number"
+                          min={0}
+                          placeholder="Minimo"
+                          value={filterDraft.min_bedrooms}
+                          onChange={(event) =>
+                            setFilterDraft((prev) => ({
+                              ...prev,
+                              min_bedrooms: event.target.value
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="grid content-start gap-2">
+                        <label className="min-h-8 text-xs leading-4 text-zinc-500">
+                          Banheiros min.
+                        </label>
+                        <Input
+                          className="h-10 px-3.5"
+                          type="number"
+                          min={0}
+                          placeholder="Minimo"
+                          value={filterDraft.min_bathrooms}
+                          onChange={(event) =>
+                            setFilterDraft((prev) => ({
+                              ...prev,
+                              min_bathrooms: event.target.value
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="grid content-start gap-2">
+                        <label className="min-h-8 text-xs leading-4 text-zinc-500">
+                          Vagas min.
+                        </label>
+                        <Input
+                          className="h-10 px-3.5"
+                          type="number"
+                          min={0}
+                          placeholder="Minimo"
+                          value={filterDraft.min_parking}
+                          onChange={(event) =>
+                            setFilterDraft((prev) => ({
+                              ...prev,
+                              min_parking: event.target.value
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-x-3 gap-y-4 md:grid-cols-2">
+                      <div className="grid content-start gap-2">
+                        <label className="text-xs leading-4 text-zinc-500">
+                          Area minima (m2)
+                        </label>
+                        <Input
+                          className="h-10 px-3.5"
+                          type="number"
+                          min={0}
+                          placeholder="Area minima"
+                          value={filterDraft.min_area_m2}
+                          onChange={(event) =>
+                            setFilterDraft((prev) => ({
+                              ...prev,
+                              min_area_m2: event.target.value
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="grid content-start gap-2">
+                        <label className="text-xs leading-4 text-zinc-500">
+                          Area maxima (m2)
+                        </label>
+                        <Input
+                          className="h-10 px-3.5"
+                          type="number"
+                          min={0}
+                          placeholder="Area maxima"
+                          value={filterDraft.max_area_m2}
+                          onChange={(event) =>
+                            setFilterDraft((prev) => ({
+                              ...prev,
+                              max_area_m2: event.target.value
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <Button onClick={handleSaveFilters} disabled={filterSaving}>
+                  {filterSaving ? "Salvando..." : "Salvar filtros"}
+                </Button>
+              </div>
             </Card>
           ) : null}
 
           {selectedClientId ? (
-            <Card className="space-y-4">
+            <Card className="space-y-3 p-4 xl:col-start-1 xl:row-start-2">
               <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                 <div>
                   <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
                     Matches
                   </p>
-                  <h3 className="mt-2 text-lg font-semibold">
+                  <h3 className="mt-1 text-base font-semibold">
                     Stack em tempo real
                   </h3>
                 </div>
@@ -3757,7 +4137,7 @@ export default function CrmPage() {
                 </div>
               </div>
 
-              <div className="relative h-[560px] overflow-hidden">
+              <div className="relative h-[470px] overflow-hidden xl:h-[500px]">
                 <AnimatePresence>
                   {topMatches.map((match, index) => {
                     const listing = match.listing;
@@ -3797,14 +4177,14 @@ export default function CrmPage() {
                             handleSwipe(match, "left");
                           }
                         }}
-                        className={`absolute inset-0 rounded-2xl border border-zinc-800 bg-black/60 p-6 shadow-glow backdrop-blur-md overflow-hidden ${isTop ? "pointer-events-auto" : "pointer-events-none"
+                        className={`absolute inset-0 rounded-2xl border border-zinc-800 bg-black/60 p-4 shadow-glow backdrop-blur-md overflow-hidden sm:p-5 ${isTop ? "pointer-events-auto" : "pointer-events-none"
                           }`}
                         style={{ zIndex: 10 - index }}
                       >
                         <div className="pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-white/5 to-transparent" />
                         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/80 to-transparent" />
 
-                        <div className="relative flex h-full flex-col gap-4">
+                        <div className="relative flex h-full flex-col gap-3">
                           <div className="flex items-start justify-between gap-4 text-xs text-zinc-400">
                             <div className="space-y-1">
                               <span className="block text-sm text-white">
@@ -3826,7 +4206,7 @@ export default function CrmPage() {
                             </div>
                           </div>
 
-                          <div className="relative h-[280px] overflow-hidden rounded-xl border border-zinc-800 bg-black/50">
+                          <div className="relative h-[210px] overflow-hidden rounded-xl border border-zinc-800 bg-black/50 sm:h-[230px] xl:h-[240px]">
                             {listing?.main_image_url ? (
                               <Image
                                 src={listing.main_image_url}
@@ -3877,7 +4257,7 @@ export default function CrmPage() {
                           </div>
 
                           <div
-                            className="mt-auto space-y-3 text-xs text-zinc-500"
+                            className="mt-auto space-y-2.5 text-xs text-zinc-500"
                             onPointerDown={(event) => event.stopPropagation()}
                           >
                             <div className="flex flex-wrap gap-2">
@@ -3955,17 +4335,17 @@ export default function CrmPage() {
           ) : null}
 
           {selectedClientId ? (
-            <Card className="space-y-4">
+            <Card className="space-y-3 p-4 xl:col-start-1 xl:row-start-3">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
                     Curadoria
                   </p>
-                  <h3 className="mt-2 text-lg font-semibold">
+                  <h3 className="mt-1 text-base font-semibold">
                     Selecionados para o cliente
                   </h3>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Button
                     variant="ghost"
                     onClick={handleGenerateShare}
@@ -3987,7 +4367,7 @@ export default function CrmPage() {
                 </div>
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-3 xl:max-h-[360px] xl:overflow-y-auto xl:pr-1">
                 {matchesError ? (
                   <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
                     {matchesError}
@@ -4007,7 +4387,7 @@ export default function CrmPage() {
                   return (
                     <div
                       key={match.id}
-                      className="flex items-center justify-between rounded-xl border border-zinc-800 bg-black/50 px-4 py-3"
+                      className="flex items-center justify-between rounded-xl border border-zinc-800 bg-black/50 px-3 py-2.5"
                     >
                       <div>
                         <p
@@ -4083,86 +4463,6 @@ export default function CrmPage() {
             </Card>
           ) : null}
 
-          {selectedClientId ? (
-            <Card className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                    Arquivados
-                  </p>
-                  <h3 className="mt-2 text-lg font-semibold">
-                    Imóveis guardados
-                  </h3>
-                </div>
-                <Button
-                  variant="ghost"
-                  disabled={!archivedHasMore || archivedLoading}
-                  onClick={() => {
-                    const nextPage = archivedPage + 1;
-                    setArchivedPage(nextPage);
-                    fetchArchived(selectedClientId, nextPage);
-                  }}
-                >
-                  Carregar mais
-                </Button>
-              </div>
-
-              <div className="space-y-3">
-                {matchesError ? (
-                  <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                    {matchesError}
-                  </p>
-                ) : null}
-                {archivedLoading && archived.length === 0 ? (
-                  <div className="h-24 rounded-xl border border-zinc-800 bg-white/5 animate-pulse" />
-                ) : null}
-                {archived.length === 0 && !archivedLoading ? (
-                  <p className="text-sm text-zinc-500">
-                    Nenhum imóvel arquivado.
-                  </p>
-                ) : null}
-                {archived.map((match) => {
-                  const archivedTitle = truncateWords(
-                    match.listing?.title || "Listing",
-                    10
-                  );
-                  return (
-                    <div
-                      key={match.id}
-                      className="flex items-center justify-between rounded-xl border border-zinc-800 bg-black/50 px-4 py-3"
-                    >
-                      <div>
-                        <p
-                          className="text-sm font-medium"
-                          title={match.listing?.title || "Listing"}
-                        >
-                          {archivedTitle}
-                        </p>
-                        <p className="text-xs text-zinc-500">
-                          {getNeighborhood(match.listing)}
-                        </p>
-                      </div>
-                      <div className="flex flex-col items-end gap-2 text-xs text-zinc-500">
-                        <span>
-                          {formatCurrency(match.listing?.price ?? null)}
-                        </span>
-                        {match.listing?.url ? (
-                          <a
-                            href={match.listing.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="underline underline-offset-4"
-                          >
-                            Abrir anúncio
-                          </a>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </Card>
-          ) : null}
         </div>
       </div>
 

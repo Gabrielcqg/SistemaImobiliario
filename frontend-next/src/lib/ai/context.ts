@@ -1,6 +1,7 @@
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { buildMessageForLead, MESSAGE_TEMPLATES } from "@/lib/ai/messageTemplates";
 import { rankLeadsByScore } from "@/lib/ai/scoring";
+import { matchesUnifiedPropertyFilter } from "@/lib/listings/unifiedPropertyFilter";
 import type {
   AIContextPayload,
   BaseLead,
@@ -15,11 +16,11 @@ const WAITING_RETURN_WINDOW_DAYS = 3;
 const CAPTURE_POOL_SIZE = 260;
 
 const LISTINGS_SELECT_WITH_SIGNALS =
-  "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, portal, first_seen_at, main_image_url, url, published_at, below_market_badge, previous_price, price_changed_at, badges, price_per_m2, is_active, org_id";
+  "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, property_subtype, portal, first_seen_at, main_image_url, url, published_at, below_market_badge, previous_price, price_changed_at, badges, price_per_m2, is_active, org_id";
 const LISTINGS_SELECT_WITHOUT_BELOW_MARKET =
-  "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, portal, first_seen_at, main_image_url, url, published_at, previous_price, price_changed_at, badges, price_per_m2, is_active, org_id";
+  "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, property_subtype, portal, first_seen_at, main_image_url, url, published_at, previous_price, price_changed_at, badges, price_per_m2, is_active, org_id";
 const LISTINGS_SELECT_BASE =
-  "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, portal, first_seen_at, main_image_url, url, published_at, is_active, org_id";
+  "id, title, price, city, state, neighborhood, neighborhood_normalized, bedrooms, bathrooms, parking, area_m2, property_type, property_subtype, portal, first_seen_at, main_image_url, url, published_at, is_active, org_id";
 
 const PROPERTY_TYPES = new Set(["apartment", "house", "land", "other"]);
 
@@ -73,6 +74,7 @@ type CaptureListing = {
   parking: number | null;
   area_m2: number | null;
   property_type: "apartment" | "house" | "other" | "land" | null;
+  property_subtype: string | null;
   portal: string | null;
   first_seen_at: string | null;
   published_at: string | null;
@@ -266,6 +268,10 @@ const normalizeListingRow = (row: ListingRow): CaptureListing => {
     parking: toIntOrNull(row.parking),
     area_m2: toNumberOrNull(row.area_m2),
     property_type: propertyType,
+    property_subtype:
+      typeof row.property_subtype === "string"
+        ? ((normalizeText(row.property_subtype) as CaptureListing["property_subtype"]) ?? null)
+        : null,
     portal: typeof row.portal === "string" ? row.portal : null,
     first_seen_at: typeof row.first_seen_at === "string" ? row.first_seen_at : null,
     main_image_url: typeof row.main_image_url === "string" ? row.main_image_url : null,
@@ -614,6 +620,7 @@ async function fetchCaptureCandidates(args: {
         parking: item.parking,
         area_m2: item.area_m2,
         property_type: item.property_type,
+        property_subtype: item.property_subtype,
         portal: item.portal,
         first_seen_at: item.first_seen_at,
         published_at: item.published_at,
@@ -685,8 +692,7 @@ const countMatchingOpportunities = (
     }
 
     if (propertyTypes.size > 0) {
-      const propertyType = normalizeText(listing.property_type);
-      if (!propertyTypes.has(propertyType)) return false;
+      if (!matchesUnifiedPropertyFilter(listing, Array.from(propertyTypes))) return false;
     }
 
     if (!passesMinOrZero(listing.bedrooms, leadFilter.min_bedrooms)) return false;
