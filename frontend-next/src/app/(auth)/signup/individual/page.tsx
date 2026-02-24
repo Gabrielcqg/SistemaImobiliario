@@ -294,7 +294,7 @@ export default function SignupIndividualPage() {
             Se nao encontrar o e-mail, verifique Spam e Lixo eletronico.
           </p>
           <p className="text-xs text-zinc-300">
-            Procure por HomeRadar no assunto ou remetente.
+            Procure por ImoRadar no assunto ou remetente.
           </p>
         </div>
 

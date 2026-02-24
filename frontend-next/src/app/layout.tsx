@@ -19,8 +19,8 @@ const spaceMono = Space_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "HomeRadar",
-    template: "%s • HomeRadar"
+    default: "ImoRadar",
+    template: "%s • ImoRadar"
   },
   description: "Modern real-estate search and lead radar.",
   icons: {
