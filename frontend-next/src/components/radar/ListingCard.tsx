@@ -46,7 +46,7 @@ type ListingCardProps = {
   className?: string;
 };
 
-const isPositiveNumber = (value: number | null | undefined) =>
+const isPositiveNumber = (value: number | null | undefined): value is number =>
   typeof value === "number" && Number.isFinite(value) && value > 0;
 
 export default function ListingCard({ listing, className = "" }: ListingCardProps) {
