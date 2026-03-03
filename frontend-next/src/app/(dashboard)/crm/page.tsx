@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -29,6 +29,13 @@ import {
   normalizeUnifiedPropertyCategories,
   type UnifiedPropertyCategory
 } from "@/lib/listings/unifiedPropertyFilter";
+import {
+  applyPendingPipelineStatus,
+  resolveClientSelectionDecision,
+  resolveCommittedPipelineFromServer,
+  type SelectionLock,
+  type SelectionLockReason
+} from "@/lib/crm/selectionGuards";
 
 type PipelineStatus =
   | "novo_match"
@@ -173,6 +180,23 @@ type CrmTimelineEvent = {
   created_at: string | null;
 };
 
+type CrmClientsBundleCache = {
+  ownerUserId: string;
+  clients: Client[];
+  clientAlerts: Record<string, number>;
+};
+
+type CrmClientBundleCache = {
+  filter: ClientFilter | null;
+  matches: Match[];
+  matchesHasMore: boolean;
+  history: Match[];
+  historyHasMore: boolean;
+  archived: Match[];
+  archivedHasMore: boolean;
+  timeline: CrmTimelineEvent[];
+};
+
 type PipelineModalSource = "pipeline" | "card";
 
 type PipelineTransitionDraft = {
@@ -299,6 +323,15 @@ const createInitialPipelineTransitionDraft = (): PipelineTransitionDraft => ({
 const CONTACT_CHASE_HOURS = 24;
 const RETURN_CHASE_HOURS = 48;
 const RESULT_OVERLAY_DURATION_MS = 900;
+const CLIENTS_SYNC_HINT_DURATION_MS = 2200;
+const DEBUG_CRM_ENABLED_BY_ENV =
+  process.env.NEXT_PUBLIC_DEBUG_CRM === "1" || process.env.DEBUG_CRM === "1";
+const DEBUG_CRM_DEFAULT_DELAY_MS = (() => {
+  const raw = process.env.NEXT_PUBLIC_DEBUG_CRM_DELAY_MS;
+  if (!raw) return 0;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+})();
 
 const formatCurrency = (value: number | null) => {
   if (value === null || Number.isNaN(value)) return "—";
@@ -640,18 +673,23 @@ export default function CrmPage() {
   );
   const [shareMessage, setShareMessage] = useState<string | null>(null);
   const [shareFeedback, setShareFeedback] = useState<string | null>(null);
+  const [clientsSyncHint, setClientsSyncHint] = useState<string | null>(null);
   const [isClientSide, setIsClientSide] = useState(false);
   const [timelineEvents, setTimelineEvents] = useState<CrmTimelineEvent[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(false);
   const [timelineError, setTimelineError] = useState<string | null>(null);
   const [mobileStagePickerOpen, setMobileStagePickerOpen] = useState(false);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
-  const [statusModalSaving, setStatusModalSaving] = useState(false);
+  const [isSavingPipeline, setIsSavingPipeline] = useState(false);
   const [statusModalError, setStatusModalError] = useState<string | null>(null);
   const [clientFormModalOpen, setClientFormModalOpen] = useState(false);
   const [resultOverlayType, setResultOverlayType] = useState<"won" | "lost" | null>(
     null
   );
+  const [committedPipelineStatusState, setCommittedPipelineStatusState] =
+    useState<PipelineStatus>("novo_match");
+  const [pendingPipelineStatusState, setPendingPipelineStatusState] =
+    useState<PipelineStatus | null>(null);
   const [statusModalTarget, setStatusModalTarget] =
     useState<PipelineStatus>("novo_match");
   const [statusModalFrom, setStatusModalFrom] =
@@ -661,10 +699,6 @@ export default function CrmPage() {
   const [transitionDraft, setTransitionDraft] = useState<PipelineTransitionDraft>(
     createInitialPipelineTransitionDraft
   );
-  const [confirmedIndex, setConfirmedIndex] = useState(0);
-  const [pendingIndex, setPendingIndex] = useState<number | null>(null);
-  const [animIndex, setAnimIndex] = useState(0);
-  const [isPipelineAnimating, setIsPipelineAnimating] = useState(false);
   const [pipelineTrack, setPipelineTrack] = useState({
     start: 0,
     width: 0,
@@ -672,19 +706,29 @@ export default function CrmPage() {
     top: 0,
     ready: false
   });
-  const prefersReducedMotion = useReducedMotion();
 
   const realtimeRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const queueRef = useRef<Match[]>([]);
   const queueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pipelineAnimationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resultOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clientsSyncHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const processingQueueRef = useRef(false);
   const selectedClientIdRef = useRef<string | null>(null);
+  const selectionLockRef = useRef<SelectionLock | null>(null);
+  const pendingPipelineStatusByClientRef = useRef<
+    Record<string, { status: PipelineStatus; expiresAt: number }>
+  >({});
+  const suppressClientsSyncHintRef = useRef(0);
+  const hasAppliedClientsSignatureRef = useRef(false);
+  const lastClientsSignatureRef = useRef<string>("");
   const lastAppliedClientsBundleKeyRef = useRef<string | null>(null);
   const lastAppliedClientBundleKeyRef = useRef<string | null>(null);
   const lastViewedAtRef = useRef<Record<string, string>>({});
   const matchIdsRef = useRef<Set<string>>(new Set());
+  const prevSelectedClientIdDebugRef = useRef<string | null>(null);
+  const prevPipelineStatusDebugRef = useRef<PipelineStatus | null>(null);
+  const prevClientModalOpenDebugRef = useRef(false);
+  const prevStatusModalOpenDebugRef = useRef(false);
   const pipelineChipsRef = useRef<HTMLDivElement | null>(null);
   const pipelineButtonRefs = useRef<Record<PipelineStatus, HTMLButtonElement | null>>(
     {
@@ -700,10 +744,14 @@ export default function CrmPage() {
   const acknowledgeClientViewRef = useRef<(clientId: string) => void>(() => { });
   const listingRulesRef = useRef<ListingRules | null>(null);
 
-  const confirmedPipelineStatus = normalizePipelineStatus(clientDraft.status_pipeline);
-  const displayIndex = isPipelineAnimating ? animIndex : confirmedIndex;
-  const displayPipelineStatus =
-    PIPELINE_STEPS[displayIndex]?.value ?? PIPELINE_STEPS[0].value;
+  const committedPipelineStatus = committedPipelineStatusState;
+  const pendingPipelineStatus = pendingPipelineStatusState;
+  const pendingIndex = pendingPipelineStatus
+    ? PIPELINE_INDEX_BY_STATUS[pendingPipelineStatus]
+    : null;
+  const confirmedPipelineStatus = committedPipelineStatus;
+  const displayIndex = PIPELINE_INDEX_BY_STATUS[committedPipelineStatus];
+  const displayPipelineStatus = committedPipelineStatus;
   const isResultOverlayVisible = Boolean(resultOverlayType);
   const statusModalIsActivityOnly = statusModalFrom === statusModalTarget;
   const statusModalScheduleLabel =
@@ -732,22 +780,67 @@ export default function CrmPage() {
     () => parseDueFilter(searchParams.get("due")),
     [searchParams]
   );
+  const debugCrmEnabled = useMemo(
+    () => DEBUG_CRM_ENABLED_BY_ENV || searchParams.get("debugCRM") === "1",
+    [searchParams]
+  );
+  const debugDelayMs = useMemo(() => {
+    const raw = searchParams.get("debugDelayMs");
+    if (!raw) return DEBUG_CRM_DEFAULT_DELAY_MS;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 0) return 0;
+    return parsed;
+  }, [searchParams]);
+  const debugCRM = useCallback(
+    (
+      event: string,
+      payload?: Record<string, unknown>,
+      options?: {
+        includeStack?: boolean;
+      }
+    ) => {
+      if (!debugCrmEnabled) return;
+      const stack =
+        options?.includeStack && typeof window !== "undefined"
+          ? new Error().stack?.split("\n").slice(2, 8).join("\n")
+          : undefined;
+      console.log(`[CRM][DEBUG] ${event}`, {
+        at: new Date().toISOString(),
+        ...(payload ?? {}),
+        ...(stack ? { stack } : {})
+      });
+    },
+    [debugCrmEnabled]
+  );
+  const maybeDebugDelay = useCallback(
+    async (label: string) => {
+      if (!debugCrmEnabled || debugDelayMs <= 0) return;
+      debugCRM("debug-delay:start", { label, delayMs: debugDelayMs });
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, debugDelayMs);
+      });
+      debugCRM("debug-delay:end", { label, delayMs: debugDelayMs });
+    },
+    [debugCRM, debugCrmEnabled, debugDelayMs]
+  );
   const clientsQueryOptions = useMemo(
     () =>
       createCrmClientsQueryOptions({
         supabase,
-        organizationId: organizationId ?? "__no-org__"
+        organizationId: organizationId ?? "__no-org__",
+        debugDelayMs: debugCrmEnabled ? debugDelayMs : 0
       }),
-    [organizationId, supabase]
+    [debugCrmEnabled, debugDelayMs, organizationId, supabase]
   );
   const selectedClientBundleQueryOptions = useMemo(
     () =>
       createCrmClientBundleQueryOptions({
         supabase,
         organizationId: organizationId ?? "__no-org__",
-        clientId: selectedClientId ?? "__no-client__"
+        clientId: selectedClientId ?? "__no-client__",
+        debugDelayMs: debugCrmEnabled ? debugDelayMs : 0
       }),
-    [organizationId, selectedClientId, supabase]
+    [debugCrmEnabled, debugDelayMs, organizationId, selectedClientId, supabase]
   );
   const clientsQuery = useQuery({
     ...clientsQueryOptions,
@@ -756,8 +849,7 @@ export default function CrmPage() {
   });
   const selectedClientBundleQuery = useQuery({
     ...selectedClientBundleQueryOptions,
-    enabled: Boolean(organizationId && selectedClientId),
-    placeholderData: (previous) => previous
+    enabled: Boolean(organizationId && selectedClientId)
   });
   const clientsSource = useMemo(
     () => clientsQuery.data?.clients ?? [],
@@ -826,59 +918,43 @@ export default function CrmPage() {
     [clientsSource]
   );
 
-  const clearPipelineAnimationTimer = useCallback(() => {
-    if (!pipelineAnimationTimerRef.current) return;
-    clearTimeout(pipelineAnimationTimerRef.current);
-    pipelineAnimationTimerRef.current = null;
-  }, []);
-
-  const playPipelineProgressAnimation = useCallback(
-    async (targetIndex: number) => {
-      const normalizedTarget = Math.max(
-        0,
-        Math.min(targetIndex, PIPELINE_STEPS.length - 1)
-      );
-
-      clearPipelineAnimationTimer();
-
-      if (prefersReducedMotion) {
-        setAnimIndex(normalizedTarget);
-        setIsPipelineAnimating(false);
-        return;
-      }
-
-      setIsPipelineAnimating(true);
-      setAnimIndex(0);
-
-      await new Promise<void>((resolve) => {
-        let current = 0;
-        const stepMs = 150;
-
-        const tick = () => {
-          if (current >= normalizedTarget) {
-            setAnimIndex(normalizedTarget);
-            setIsPipelineAnimating(false);
-            pipelineAnimationTimerRef.current = null;
-            resolve();
-            return;
-          }
-
-          current += 1;
-          setAnimIndex(current);
-          pipelineAnimationTimerRef.current = setTimeout(tick, stepMs);
-        };
-
-        if (normalizedTarget === 0) {
-          setAnimIndex(0);
-          setIsPipelineAnimating(false);
-          resolve();
-          return;
+  const setCommittedPipelineStatus = useCallback(
+    (nextStatus: PipelineStatus, source: string) => {
+      setCommittedPipelineStatusState((previous) => {
+        if (previous === nextStatus) return previous;
+        debugCRM("pipeline:committed-change", {
+          from: previous,
+          to: nextStatus,
+          source
+        });
+        return nextStatus;
+      });
+      setClientDraft((previous) => {
+        if (normalizePipelineStatus(previous.status_pipeline) === nextStatus) {
+          return previous;
         }
-
-        pipelineAnimationTimerRef.current = setTimeout(tick, stepMs);
+        return {
+          ...previous,
+          status_pipeline: nextStatus
+        };
       });
     },
-    [clearPipelineAnimationTimer, prefersReducedMotion]
+    [debugCRM]
+  );
+
+  const setPendingPipelineStatus = useCallback(
+    (nextStatus: PipelineStatus | null, source: string) => {
+      setPendingPipelineStatusState((previous) => {
+        if (previous === nextStatus) return previous;
+        debugCRM("pipeline:pending-change", {
+          from: previous,
+          to: nextStatus,
+          source
+        });
+        return nextStatus;
+      });
+    },
+    [debugCRM]
   );
 
   const playResultOverlay = useCallback(async (type: "won" | "lost") => {
@@ -896,6 +972,117 @@ export default function CrmPage() {
 
     setResultOverlayType(null);
   }, []);
+
+  const clearClientsSyncHintTimer = useCallback(() => {
+    if (!clientsSyncHintTimerRef.current) return;
+    clearTimeout(clientsSyncHintTimerRef.current);
+    clientsSyncHintTimerRef.current = null;
+  }, []);
+
+  const showClientsSyncHint = useCallback(
+    (message = "Atualizado agora") => {
+      clearClientsSyncHintTimer();
+      setClientsSyncHint(message);
+      clientsSyncHintTimerRef.current = setTimeout(() => {
+        clientsSyncHintTimerRef.current = null;
+        setClientsSyncHint(null);
+      }, CLIENTS_SYNC_HINT_DURATION_MS);
+    },
+    [clearClientsSyncHintTimer]
+  );
+
+  const getActiveSelectionLock = useCallback(() => {
+    const lock = selectionLockRef.current;
+    if (!lock) return null;
+    if (Date.now() <= lock.expiresAt) return lock;
+    selectionLockRef.current = null;
+    debugCRM("selection-lock:expired", lock);
+    return null;
+  }, [debugCRM]);
+
+  const setSelectionLock = useCallback(
+    (reason: SelectionLockReason, clientId: string | null, ttlMs = 12000) => {
+      const nextLock: SelectionLock = {
+        reason,
+        clientId,
+        expiresAt: Date.now() + ttlMs
+      };
+      selectionLockRef.current = nextLock;
+      debugCRM("selection-lock:set", nextLock);
+    },
+    [debugCRM]
+  );
+
+  const clearSelectionLock = useCallback(
+    (reason?: SelectionLockReason) => {
+      if (!selectionLockRef.current) return;
+      if (reason && selectionLockRef.current.reason !== reason) return;
+      debugCRM("selection-lock:clear", selectionLockRef.current);
+      selectionLockRef.current = null;
+    },
+    [debugCRM]
+  );
+
+  const invalidateCrmQuery = useCallback(
+    async (queryKey: readonly unknown[], label: string) => {
+      debugCRM("query:invalidate:start", { label, queryKey });
+      await queryClient.invalidateQueries({
+        queryKey,
+        exact: true
+      });
+      debugCRM("query:invalidate:done", { label, queryKey });
+    },
+    [debugCRM, queryClient]
+  );
+
+  const upsertClientInCache = useCallback(
+    (nextClient: Client, ownerUserIdFallback?: string | null) => {
+      if (!organizationId) return;
+
+      queryClient.setQueryData<CrmClientsBundleCache>(
+        crmQueryKeys.clients(organizationId),
+        (previous) => {
+          const nextClients = [
+            nextClient,
+            ...((previous?.clients ?? []).filter((client) => client.id !== nextClient.id))
+          ];
+          const ownerUserId =
+            previous?.ownerUserId ??
+            ownerUserIdFallback ??
+            nextClient.owner_user_id ??
+            nextClient.user_id;
+
+          return {
+            ownerUserId,
+            clients: nextClients,
+            clientAlerts: previous?.clientAlerts ?? {}
+          };
+        }
+      );
+    },
+    [organizationId, queryClient]
+  );
+
+  const seedClientBundleCache = useCallback(
+    (clientId: string) => {
+      if (!organizationId) return;
+      queryClient.setQueryData<CrmClientBundleCache>(
+        crmQueryKeys.clientBundle(organizationId, clientId),
+        (previous) =>
+          previous ?? {
+            filter: null,
+            matches: [],
+            matchesHasMore: false,
+            history: [],
+            historyHasMore: false,
+            archived: [],
+            archivedHasMore: false,
+            timeline: []
+          }
+      );
+    },
+    [organizationId, queryClient]
+  );
 
   const recalculatePipelineTrack = useCallback(() => {
     const container = pipelineChipsRef.current;
@@ -931,16 +1118,6 @@ export default function CrmPage() {
     setPipelineTrack({ start, width, fill, top: lineTop, ready: true });
   }, [displayPipelineStatus]);
 
-  useEffect(() => {
-    const nextIndex = PIPELINE_INDEX_BY_STATUS[confirmedPipelineStatus];
-    setConfirmedIndex(nextIndex);
-    if (!isPipelineAnimating) {
-      setAnimIndex(nextIndex);
-    }
-  }, [confirmedPipelineStatus, isPipelineAnimating]);
-
-  useEffect(() => () => clearPipelineAnimationTimer(), [clearPipelineAnimationTimer]);
-
   useEffect(
     () => () => {
       if (resultOverlayTimerRef.current) {
@@ -949,6 +1126,140 @@ export default function CrmPage() {
     },
     []
   );
+
+  useEffect(() => () => clearClientsSyncHintTimer(), [clearClientsSyncHintTimer]);
+
+  useEffect(() => {
+    debugCRM("crm:mounted");
+    return () => debugCRM("crm:unmounted");
+  }, [debugCRM]);
+
+  useEffect(() => {
+    if (!selectedClient) return;
+    const pending = pendingPipelineStatusByClientRef.current[selectedClient.id];
+    const {
+      client: selectedClientWithResolvedPending,
+      pendingExpired,
+      pendingResolved
+    } = applyPendingPipelineStatus(selectedClient, pending);
+    if (pendingExpired || pendingResolved) {
+      delete pendingPipelineStatusByClientRef.current[selectedClient.id];
+    }
+    const nextStatus = normalizePipelineStatus(
+      selectedClientWithResolvedPending.status_pipeline
+    );
+    const commitDecision = resolveCommittedPipelineFromServer({
+      currentCommitted: committedPipelineStatus,
+      incomingFromServer: nextStatus,
+      isSavingPipeline
+    });
+    if (!commitDecision.changed) {
+      if (commitDecision.reason === "saving-lock") {
+        debugCRM("pipeline:sync-skip-while-saving", {
+          selectedClientId,
+          nextStatus,
+          committedPipelineStatus
+        });
+      }
+      return;
+    }
+    setCommittedPipelineStatus(commitDecision.nextCommitted, "selected-client-sync");
+  }, [
+    committedPipelineStatus,
+    debugCRM,
+    isSavingPipeline,
+    selectedClient,
+    selectedClientId,
+    setCommittedPipelineStatus
+  ]);
+
+  useEffect(() => {
+    const previous = prevSelectedClientIdDebugRef.current;
+    if (previous === selectedClientId) return;
+    debugCRM(
+      "state:selected-client-id",
+      {
+        from: previous,
+        to: selectedClientId,
+        modalOpen: clientFormModalOpen,
+        isCreatingClient
+      },
+      { includeStack: true }
+    );
+    prevSelectedClientIdDebugRef.current = selectedClientId;
+  }, [clientFormModalOpen, debugCRM, isCreatingClient, selectedClientId]);
+
+  useEffect(() => {
+    const previous = prevPipelineStatusDebugRef.current;
+    if (previous === confirmedPipelineStatus) return;
+    debugCRM("state:pipeline-status", {
+      from: previous,
+      to: confirmedPipelineStatus,
+      selectedClientId
+    });
+    prevPipelineStatusDebugRef.current = confirmedPipelineStatus;
+  }, [confirmedPipelineStatus, debugCRM, selectedClientId]);
+
+  useEffect(() => {
+    const previous = prevClientModalOpenDebugRef.current;
+    if (previous === clientFormModalOpen) return;
+    debugCRM("modal:client-form", {
+      from: previous,
+      to: clientFormModalOpen,
+      mode: isCreatingClient ? "create" : "edit",
+      selectedClientId
+    });
+    prevClientModalOpenDebugRef.current = clientFormModalOpen;
+  }, [clientFormModalOpen, debugCRM, isCreatingClient, selectedClientId]);
+
+  useEffect(() => {
+    const previous = prevStatusModalOpenDebugRef.current;
+    if (previous === statusModalOpen) return;
+    debugCRM("modal:pipeline-status", {
+      from: previous,
+      to: statusModalOpen,
+      target: statusModalTarget,
+      source: statusModalSource,
+      selectedClientId
+    });
+    prevStatusModalOpenDebugRef.current = statusModalOpen;
+  }, [debugCRM, selectedClientId, statusModalOpen, statusModalSource, statusModalTarget]);
+
+  useEffect(() => {
+    debugCRM("query:clients", {
+      fetchStatus: clientsQuery.fetchStatus,
+      isFetching: clientsQuery.isFetching,
+      isPending: clientsQuery.isPending,
+      dataUpdatedAt: clientsQuery.dataUpdatedAt,
+      size: clientsQuery.data?.clients.length ?? 0
+    });
+  }, [
+    clientsQuery.data?.clients.length,
+    clientsQuery.dataUpdatedAt,
+    clientsQuery.fetchStatus,
+    clientsQuery.isFetching,
+    clientsQuery.isPending,
+    debugCRM
+  ]);
+
+  useEffect(() => {
+    debugCRM("query:selected-client-bundle", {
+      selectedClientId,
+      fetchStatus: selectedClientBundleQuery.fetchStatus,
+      isFetching: selectedClientBundleQuery.isFetching,
+      isPending: selectedClientBundleQuery.isPending,
+      dataUpdatedAt: selectedClientBundleQuery.dataUpdatedAt,
+      hasData: Boolean(selectedClientBundleQuery.data)
+    });
+  }, [
+    debugCRM,
+    selectedClientBundleQuery.data,
+    selectedClientBundleQuery.dataUpdatedAt,
+    selectedClientBundleQuery.fetchStatus,
+    selectedClientBundleQuery.isFetching,
+    selectedClientBundleQuery.isPending,
+    selectedClientId
+  ]);
 
   useEffect(() => {
     const raf = window.requestAnimationFrame(recalculatePipelineTrack);
@@ -1021,6 +1332,8 @@ export default function CrmPage() {
   }, []);
 
   const openCreateClientForm = useCallback(() => {
+    debugCRM("client-form:open-create", { selectedClientId: selectedClientIdRef.current });
+    clearSelectionLock("create-client");
     setIsCreatingClient(true);
     setClientError(null);
     setClientDraft({
@@ -1032,18 +1345,25 @@ export default function CrmPage() {
       status_pipeline: PIPELINE_STEPS[0].value
     });
     setClientFormModalOpen(true);
-  }, []);
+  }, [clearSelectionLock, debugCRM]);
 
   const openEditClientForm = useCallback(() => {
     if (!selectedClient) return;
+    debugCRM("client-form:open-edit", { selectedClientId: selectedClient.id });
+    clearSelectionLock("create-client");
     setIsCreatingClient(false);
     setClientError(null);
     resetDraftFromClient(selectedClient);
     setClientFormModalOpen(true);
-  }, [resetDraftFromClient, selectedClient]);
+  }, [clearSelectionLock, debugCRM, resetDraftFromClient, selectedClient]);
 
   const closeClientFormModal = useCallback(() => {
     if (clientSaving) return;
+    debugCRM("client-form:close", {
+      mode: isCreatingClient ? "create" : "edit",
+      selectedClientId
+    });
+    clearSelectionLock("create-client");
     setClientFormModalOpen(false);
     if (isCreatingClient) {
       setIsCreatingClient(false);
@@ -1051,24 +1371,35 @@ export default function CrmPage() {
     if (selectedClient) {
       resetDraftFromClient(selectedClient);
     }
-  }, [clientSaving, isCreatingClient, resetDraftFromClient, selectedClient]);
+  }, [
+    clearSelectionLock,
+    clientSaving,
+    debugCRM,
+    isCreatingClient,
+    resetDraftFromClient,
+    selectedClient,
+    selectedClientId
+  ]);
 
   useEffect(() => {
     if (!requestedDueFilter || isCreatingClient || visibleClients.length === 0) {
       return;
     }
 
-    if (
-      selectedClientId &&
-      visibleClients.some((client) => client.id === selectedClientId)
-    ) {
+    if (selectedClientId) {
       return;
     }
 
     const firstClient = visibleClients[0];
+    debugCRM("selection:auto-due-filter-first", {
+      selectedClientId,
+      firstClientId: firstClient.id,
+      dueFilter: requestedDueFilter
+    });
     setSelectedClientId(firstClient.id);
     resetDraftFromClient(firstClient);
   }, [
+    debugCRM,
     isCreatingClient,
     resetDraftFromClient,
     requestedDueFilter,
@@ -1484,45 +1815,97 @@ export default function CrmPage() {
         nextSelectedId?: string | null;
       }
     ) => {
-      const sorted = bundle.clients;
+      const activeSelectionLock = getActiveSelectionLock();
+      const shouldSyncDraftFromSelection = !clientFormModalOpen;
+      debugCRM("clients-bundle:apply:start", {
+        incomingClients: bundle.clients.length,
+        nextSelectedIdOption: options?.nextSelectedId ?? null,
+        lock: activeSelectionLock,
+        selectedClientIdSnapshot: selectedClientIdRef.current
+      });
+      const sorted = bundle.clients.map((client) => {
+        const pending = pendingPipelineStatusByClientRef.current[client.id];
+        const {
+          client: patchedClient,
+          pendingExpired,
+          pendingResolved
+        } = applyPendingPipelineStatus(client, pending);
+        if (pendingExpired || pendingResolved) {
+          delete pendingPipelineStatusByClientRef.current[client.id];
+        }
+        return patchedClient;
+      });
       const activeClients = sorted.filter(
         (client) => normalizePipelineStatus(client.status_pipeline) !== "fechado"
       );
+      const activeClientIds = activeClients.map((client) => client.id);
       setClientAlerts(bundle.clientAlerts);
       setClientError(null);
       setAlertsError(null);
       setIsLoadingClients(false);
 
-      if (activeClients.length === 0) {
-        setIsCreatingClient(false);
+      const requestedSelection = requestedDueFilter ? null : requestedClientId;
+      const selectionDecision = resolveClientSelectionDecision({
+        activeClientIds,
+        lock: activeSelectionLock,
+        nextSelectedIdOption: options?.nextSelectedId ?? null,
+        requestedSelection,
+        selectedClientIdSnapshot: selectedClientIdRef.current
+      });
+
+      if (selectionDecision.type === "keep") {
+        debugCRM("clients-bundle:keep-selection", {
+          reason: selectionDecision.reason,
+          lock: activeSelectionLock
+        });
+        return;
+      }
+
+      if (selectionDecision.type === "clear") {
+        debugCRM("clients-bundle:clear-selection-empty-list");
         setSelectedClientId(null);
         return;
       }
 
-      const requestedSelection = requestedDueFilter ? null : requestedClientId;
-      const preferredSelection =
-        options?.nextSelectedId ??
-        requestedSelection ??
-        selectedClientIdRef.current ??
-        null;
-
-      if (preferredSelection) {
-        const found =
-          activeClients.find((client) => client.id === preferredSelection) ?? null;
-        if (found) {
-          setSelectedClientId(preferredSelection);
-          setIsCreatingClient(false);
-          resetDraftFromClient(found);
-          return;
-        }
+      const selectedClientFromDecision =
+        activeClients.find((client) => client.id === selectionDecision.selectedClientId) ?? null;
+      if (!selectedClientFromDecision) {
+        debugCRM("clients-bundle:selection-not-found-after-decision", selectionDecision);
+        return;
       }
 
-      const fallbackClient = activeClients[0];
-      setSelectedClientId(fallbackClient.id);
-      setIsCreatingClient(false);
-      resetDraftFromClient(fallbackClient);
+      debugCRM("clients-bundle:apply-selection", {
+        reason: selectionDecision.reason,
+        selectedClientId: selectionDecision.selectedClientId,
+        preferredSelection: selectionDecision.preferredSelection,
+        lock: activeSelectionLock
+      });
+      setSelectedClientId(selectionDecision.selectedClientId);
+      if (shouldSyncDraftFromSelection) {
+        resetDraftFromClient(selectedClientFromDecision);
+      } else {
+        debugCRM("clients-bundle:skip-draft-sync-modal-open", {
+          selectedClientId: selectionDecision.selectedClientId,
+          isCreatingClient
+        });
+      }
+      if (
+        activeSelectionLock?.clientId &&
+        activeSelectionLock.clientId === selectionDecision.selectedClientId
+      ) {
+        clearSelectionLock(activeSelectionLock.reason);
+      }
     },
-    [requestedClientId, requestedDueFilter, resetDraftFromClient]
+    [
+      clearSelectionLock,
+      clientFormModalOpen,
+      debugCRM,
+      getActiveSelectionLock,
+      isCreatingClient,
+      requestedClientId,
+      requestedDueFilter,
+      resetDraftFromClient
+    ]
   );
 
   const fetchClients = useCallback(
@@ -1538,7 +1921,8 @@ export default function CrmPage() {
 
       const queryOptions = createCrmClientsQueryOptions({
         supabase,
-        organizationId
+        organizationId,
+        debugDelayMs: debugCrmEnabled ? debugDelayMs : 0
       });
       const cached = queryClient.getQueryData<{
         clients: Client[];
@@ -1564,7 +1948,15 @@ export default function CrmPage() {
         setIsLoadingClients(false);
       }
     },
-    [applyClientsBundle, clientsSource.length, organizationId, queryClient, supabase]
+    [
+      applyClientsBundle,
+      clientsSource.length,
+      debugCrmEnabled,
+      debugDelayMs,
+      organizationId,
+      queryClient,
+      supabase
+    ]
   );
 
   const fetchTimeline = async (clientId: string) => {
@@ -1617,6 +2009,12 @@ export default function CrmPage() {
     nextStatus: PipelineStatus,
     source: PipelineModalSource = "pipeline"
   ) => {
+    debugCRM("pipeline:open-modal", {
+      selectedClientId,
+      committedPipelineStatus,
+      nextStatus,
+      source
+    });
     if (!organizationId) {
       setClientError("Nenhuma organizacao ativa para atualizar o pipeline.");
       return;
@@ -1627,9 +2025,7 @@ export default function CrmPage() {
       return;
     }
 
-    const currentStatus = normalizePipelineStatus(
-      selectedClient.status_pipeline ?? clientDraft.status_pipeline
-    );
+    const currentStatus = committedPipelineStatus;
 
     const nextDraft = createInitialPipelineTransitionDraft();
     if (
@@ -1691,18 +2087,22 @@ export default function CrmPage() {
 
     setStatusModalFrom(currentStatus);
     setStatusModalTarget(nextStatus);
+    setPendingPipelineStatus(nextStatus, "pipeline-click");
     setStatusModalSource(source);
     setMobileStagePickerOpen(false);
-    setPendingIndex(PIPELINE_INDEX_BY_STATUS[nextStatus]);
     setTransitionDraft(nextDraft);
     setStatusModalError(null);
     setStatusModalOpen(true);
   };
 
   const closeStatusTransitionModal = () => {
-    if (statusModalSaving) return;
+    if (isSavingPipeline) return;
+    debugCRM("pipeline:close-modal", {
+      selectedClientId,
+      target: statusModalTarget
+    });
     setStatusModalOpen(false);
-    setPendingIndex(null);
+    setPendingPipelineStatus(null, "modal-close");
     setStatusModalError(null);
   };
 
@@ -1710,6 +2110,13 @@ export default function CrmPage() {
     nextStatus: PipelineStatus,
     source: PipelineModalSource = "pipeline"
   ) => {
+    if (isSavingPipeline) {
+      debugCRM("pipeline:click-ignored-while-saving", {
+        selectedClientId,
+        nextStatus
+      });
+      return;
+    }
     setMobileStagePickerOpen(false);
     openStatusTransitionModal(nextStatus, source);
   };
@@ -1720,13 +2127,21 @@ export default function CrmPage() {
       return;
     }
 
+    debugCRM("pipeline:save:start", {
+      selectedClientId,
+      from: statusModalFrom,
+      to: statusModalTarget
+    });
+
     const ownerUserId = await getAuthenticatedUserId();
     if (!ownerUserId) {
       setStatusModalError("Usuário não autenticado para atualizar o pipeline.");
+      debugCRM("pipeline:save:auth-missing", { selectedClientId });
       return;
     }
     if (!isClientOwnedByUser(selectedClientId, ownerUserId)) {
       setStatusModalError("Você não tem acesso para atualizar este cliente.");
+      debugCRM("pipeline:save:forbidden", { selectedClientId });
       return;
     }
 
@@ -1860,9 +2275,10 @@ export default function CrmPage() {
       legacyUpdatePayload.proposal_valid_until = proposalValidUntil;
     }
 
-    setStatusModalSaving(true);
+    setIsSavingPipeline(true);
     setStatusModalError(null);
     setClientError(null);
+    await maybeDebugDelay("pipeline-update");
 
     let { error: updateError } = await supabase
       .from("clients")
@@ -1872,6 +2288,7 @@ export default function CrmPage() {
       .eq("owner_user_id", ownerUserId);
 
     if (updateError && isMissingColumnError(updateError.message)) {
+      await maybeDebugDelay("pipeline-update-fallback");
       const fallback = await supabase
         .from("clients")
         .update(legacyUpdatePayload)
@@ -1882,9 +2299,15 @@ export default function CrmPage() {
     }
 
     if (updateError) {
-      setStatusModalSaving(false);
+      setIsSavingPipeline(false);
       setStatusModalError(updateError.message);
       console.error("Erro ao atualizar pipeline:", updateError);
+      clearSelectionLock("pipeline-update");
+      setPendingPipelineStatus(null, "save-error");
+      debugCRM("pipeline:save:error", {
+        selectedClientId,
+        message: updateError.message
+      });
       return;
     }
 
@@ -1928,14 +2351,21 @@ export default function CrmPage() {
       );
     }
 
-    const targetIndex = PIPELINE_INDEX_BY_STATUS[statusModalTarget];
-    setConfirmedIndex(targetIndex);
-    setClientDraft((prev) => ({ ...prev, status_pipeline: statusModalTarget }));
-    queryClient.setQueryData<{
-      ownerUserId: string;
-      clients: Client[];
-      clientAlerts: Record<string, number>;
-    }>(crmQueryKeys.clients(organizationId), (previous) => {
+    if (statusModalTarget !== "fechado") {
+      setSelectionLock("pipeline-update", selectedClientId, 15000);
+    } else {
+      clearSelectionLock("pipeline-update");
+    }
+    suppressClientsSyncHintRef.current += 2;
+    pendingPipelineStatusByClientRef.current[selectedClientId] = {
+      status: statusModalTarget,
+      expiresAt: Date.now() + 12000
+    };
+    setCommittedPipelineStatus(statusModalTarget, "save-success");
+    setPendingPipelineStatus(null, "save-success");
+    queryClient.setQueryData<CrmClientsBundleCache>(
+      crmQueryKeys.clients(organizationId),
+      (previous) => {
       if (!previous) return previous;
 
       return {
@@ -1980,12 +2410,11 @@ export default function CrmPage() {
             : client
         )
       };
-    });
-    const updatedClientsSnapshot = queryClient.getQueryData<{
-      ownerUserId: string;
-      clients: Client[];
-      clientAlerts: Record<string, number>;
-    }>(crmQueryKeys.clients(organizationId));
+      }
+    );
+    const updatedClientsSnapshot = queryClient.getQueryData<CrmClientsBundleCache>(
+      crmQueryKeys.clients(organizationId)
+    );
     const nextActiveClient =
       updatedClientsSnapshot?.clients.find(
         (client) =>
@@ -1994,9 +2423,7 @@ export default function CrmPage() {
       ) ?? null;
 
     setStatusModalOpen(false);
-    setPendingIndex(null);
     setStatusModalError(null);
-    setStatusModalSaving(false);
 
     const closureType =
       statusModalTarget === "fechado" &&
@@ -2006,6 +2433,7 @@ export default function CrmPage() {
 
     if (closureType) {
       await playResultOverlay(closureType);
+      clearSelectionLock("pipeline-update");
       if (nextActiveClient) {
         setSelectedClientId(nextActiveClient.id);
         setIsCreatingClient(false);
@@ -2016,19 +2444,22 @@ export default function CrmPage() {
       }
     } else {
       await fetchTimeline(selectedClientId);
-      await playPipelineProgressAnimation(targetIndex);
     }
 
     await Promise.all([
-      queryClient.invalidateQueries({
-        queryKey: crmQueryKeys.clients(organizationId),
-        exact: true
-      }),
-      queryClient.invalidateQueries({
-        queryKey: crmQueryKeys.clientBundle(organizationId, selectedClientId),
-        exact: true
-      })
+      invalidateCrmQuery(crmQueryKeys.clients(organizationId), "pipeline-update:clients-list"),
+      invalidateCrmQuery(
+        crmQueryKeys.clientBundle(organizationId, selectedClientId),
+        "pipeline-update:selected-client-bundle"
+      )
     ]);
+    clearSelectionLock("pipeline-update");
+    setIsSavingPipeline(false);
+    debugCRM("pipeline:save:done", {
+      selectedClientId,
+      from: statusModalFrom,
+      to: statusModalTarget
+    });
   };
 
   const fetchFilter = async (clientId: string) => {
@@ -2245,17 +2676,21 @@ export default function CrmPage() {
   }, [selectedClientId]);
 
   useEffect(() => {
-    clearPipelineAnimationTimer();
-    setIsPipelineAnimating(false);
     setMobileStagePickerOpen(false);
-    setPendingIndex(null);
-  }, [selectedClientId, clearPipelineAnimationTimer]);
+    setPendingPipelineStatus(null, "selected-client-change");
+  }, [selectedClientId, setPendingPipelineStatus]);
 
   useEffect(() => {
     if (organizationLoading) return;
     if (!organizationId) {
       lastAppliedClientsBundleKeyRef.current = null;
       lastAppliedClientBundleKeyRef.current = null;
+      hasAppliedClientsSignatureRef.current = false;
+      lastClientsSignatureRef.current = "";
+      suppressClientsSyncHintRef.current = 0;
+      selectionLockRef.current = null;
+      pendingPipelineStatusByClientRef.current = {};
+      setClientsSyncHint(null);
       setClientAlerts({});
       setSelectedClientId(null);
       setMatches([]);
@@ -2272,6 +2707,30 @@ export default function CrmPage() {
 
   useEffect(() => {
     if (!organizationId || !clientsQuery.data) return;
+    const nextSignature = clientsQuery.data.clients
+      .map(
+        (client) =>
+          `${client.id}:${normalizePipelineStatus(client.status_pipeline)}:${client.next_action_at ?? client.next_followup_at ?? client.data_retorno ?? ""
+          }:${client.last_status_change_at ?? ""}`
+      )
+      .join("|");
+
+    if (!hasAppliedClientsSignatureRef.current) {
+      hasAppliedClientsSignatureRef.current = true;
+      lastClientsSignatureRef.current = nextSignature;
+    } else if (lastClientsSignatureRef.current !== nextSignature) {
+      debugCRM("clients-query:signature-changed", {
+        previousSignature: lastClientsSignatureRef.current,
+        nextSignature
+      });
+      lastClientsSignatureRef.current = nextSignature;
+      if (suppressClientsSyncHintRef.current > 0) {
+        suppressClientsSyncHintRef.current -= 1;
+      } else if (!clientsQuery.isPending) {
+        showClientsSyncHint("Atualizado em background");
+      }
+    }
+
     const applyKey = `${organizationId}:${clientsQuery.dataUpdatedAt}:${requestedDueFilter ?? "none"}:${requestedClientId ?? "none"
       }`;
     if (lastAppliedClientsBundleKeyRef.current === applyKey) {
@@ -2285,9 +2744,12 @@ export default function CrmPage() {
     applyClientsBundle,
     clientsQuery.data,
     clientsQuery.dataUpdatedAt,
+    clientsQuery.isPending,
+    debugCRM,
     organizationId,
     requestedClientId,
-    requestedDueFilter
+    requestedDueFilter,
+    showClientsSyncHint
   ]);
 
   useEffect(() => {
@@ -2518,6 +2980,10 @@ export default function CrmPage() {
       return;
     }
 
+    debugCRM("client:save:start", {
+      mode: isCreatingClient ? "create" : "edit",
+      selectedClientId
+    });
     setClientSaving(true);
     setClientError(null);
     const trimmedName = clientDraft.name.trim();
@@ -2543,9 +3009,12 @@ export default function CrmPage() {
         const message = "Usuário não autenticado.";
         setClientError(message);
         setClientSaving(false);
+        debugCRM("client:create:auth-missing");
         return;
       }
 
+      setSelectionLock("create-client", selectedClientIdRef.current, 20000);
+      await maybeDebugDelay("client-create");
       const { data, error } = await supabase
         .from("clients")
         .insert({
@@ -2572,6 +3041,7 @@ export default function CrmPage() {
       let createData = data as Client | null;
       let createError = error;
       if (createError && isMissingColumnError(createError.message)) {
+        await maybeDebugDelay("client-create-fallback");
         const fallback = await supabase
           .from("clients")
           .insert({
@@ -2597,31 +3067,59 @@ export default function CrmPage() {
       }
 
       if (createError) {
+        clearSelectionLock("create-client");
         setClientError(createError.message);
         console.error("Erro ao criar client:", createError);
         setClientSaving(false);
+        debugCRM("client:create:error", { message: createError.message });
         return;
       }
 
       if (createData) {
-        setSelectedClientId((createData as Client).id);
-        setIsCreatingClient(false);
-        await fetchClients((createData as Client).id);
+        const createdClient = createData as Client;
+        debugCRM("client:create:success", {
+          createdClientId: createdClient.id,
+          previousSelectedClientId: selectedClientIdRef.current
+        });
+        suppressClientsSyncHintRef.current += 2;
+        setSelectionLock("create-client", createdClient.id, 20000);
+        upsertClientInCache(createdClient, ownerUserId);
+        seedClientBundleCache(createdClient.id);
+        setSelectedClientId(createdClient.id);
+        resetDraftFromClient(createdClient);
         setClientFormModalOpen(false);
+        setIsCreatingClient(false);
+        showClientsSyncHint("Cliente criado");
+        setClientSaving(false);
+
+        await Promise.all([
+          invalidateCrmQuery(
+            crmQueryKeys.clients(organizationId),
+            "client-create:clients-list"
+          ),
+          invalidateCrmQuery(
+            crmQueryKeys.clientBundle(organizationId, createdClient.id),
+            "client-create:selected-client-bundle"
+          )
+        ]);
+        return;
       }
     } else if (selectedClientId) {
       const ownerUserId = await getAuthenticatedUserId();
       if (!ownerUserId) {
         setClientError("Usuário não autenticado para atualizar cliente.");
         setClientSaving(false);
+        debugCRM("client:update:auth-missing", { selectedClientId });
         return;
       }
       if (!isClientOwnedByUser(selectedClientId, ownerUserId)) {
         setClientError("Você não tem acesso para atualizar este cliente.");
         setClientSaving(false);
+        debugCRM("client:update:forbidden", { selectedClientId });
         return;
       }
 
+      await maybeDebugDelay("client-update");
       let { error } = await supabase
         .from("clients")
         .update({
@@ -2642,6 +3140,7 @@ export default function CrmPage() {
         .eq("owner_user_id", ownerUserId);
 
       if (error && isMissingColumnError(error.message)) {
+        await maybeDebugDelay("client-update-fallback");
         const fallback = await supabase
           .from("clients")
           .update({
@@ -2664,12 +3163,43 @@ export default function CrmPage() {
       if (error) {
         setClientError(error.message);
         console.error("Erro ao atualizar client:", error);
+        debugCRM("client:update:error", { selectedClientId, message: error.message });
       } else {
-        await fetchClients(selectedClientId);
+        debugCRM("client:update:success", { selectedClientId });
+        const optimisticClient =
+          clientsSource.find((client) => client.id === selectedClientId) ?? null;
+        if (optimisticClient) {
+          suppressClientsSyncHintRef.current += 2;
+          upsertClientInCache(
+            {
+              ...optimisticClient,
+              name: trimmedName,
+              contact_info: {
+                email: clientDraft.email?.trim() || undefined,
+                phone: clientDraft.phone?.trim() || undefined
+              },
+              data_retorno: nextActionDate,
+              descricao_contexto: clientDraft.descricao_contexto || null,
+              status_pipeline: clientDraft.status_pipeline || null,
+              next_followup_at: nextActionAt,
+              next_action_at: nextActionAt,
+              chase_due_at: chaseDueAt
+            },
+            ownerUserId
+          );
+        }
         setClientFormModalOpen(false);
+        showClientsSyncHint("Cliente atualizado");
+        setClientSaving(false);
+        await invalidateCrmQuery(
+          crmQueryKeys.clients(organizationId),
+          "client-update:clients-list"
+        );
+        return;
       }
     } else {
       setClientError("Selecione um client para editar.");
+      debugCRM("client:update:missing-selection");
     }
 
     setClientSaving(false);
@@ -3237,6 +3767,11 @@ export default function CrmPage() {
               </span>
             </p>
           ) : null}
+          {clientsSyncHint ? (
+            <p className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+              {clientsSyncHint}
+            </p>
+          ) : null}
           <div className="space-y-2">
             {isLoadingClients && visibleClients.length === 0 ? (
               <SkeletonList />
@@ -3255,6 +3790,10 @@ export default function CrmPage() {
                     key={client.id}
                     type="button"
                     onClick={() => {
+                      debugCRM("selection:user-click-client", {
+                        previousSelectedClientId: selectedClientIdRef.current,
+                        nextSelectedClientId: client.id
+                      });
                       setIsCreatingClient(false);
                       setSelectedClientId(client.id);
                       resetDraftFromClient(client);
@@ -3394,8 +3933,7 @@ export default function CrmPage() {
                       type="button"
                       variant="secondary"
                       disabled={
-                        statusModalSaving ||
-                        isPipelineAnimating ||
+                        isSavingPipeline ||
                         isCreatingClient ||
                         !selectedClientId
                       }
@@ -3407,8 +3945,7 @@ export default function CrmPage() {
                       type="button"
                       variant="ghost"
                       disabled={
-                        statusModalSaving ||
-                        isPipelineAnimating ||
+                        isSavingPipeline ||
                         isCreatingClient ||
                         !selectedClientId
                       }
@@ -3464,8 +4001,7 @@ export default function CrmPage() {
                           type="button"
                           onClick={() => handlePipelineChange(step.value)}
                           disabled={
-                            statusModalSaving ||
-                            isPipelineAnimating ||
+                            isSavingPipeline ||
                             isCreatingClient ||
                             !selectedClientId
                           }
@@ -4424,7 +4960,7 @@ export default function CrmPage() {
                           </Button>
                           <Button
                             variant="ghost"
-                            disabled={statusModalSaving || isPipelineAnimating}
+                            disabled={isSavingPipeline}
                             onClick={() =>
                               handlePipelineChange("visita_agendada", "card")
                             }
@@ -4510,7 +5046,7 @@ export default function CrmPage() {
                             <button
                               key={step.value}
                               type="button"
-                              disabled={statusModalSaving || isPipelineAnimating}
+                              disabled={isSavingPipeline}
                               onClick={() => handlePipelineChange(step.value)}
                               className={`flex w-full items-start gap-3 rounded-xl border px-3 py-3 text-left transition accent-focus focus-visible:outline-none ${isActive
                                 ? "accent-fill accent-sheen text-zinc-50"
@@ -4602,6 +5138,7 @@ export default function CrmPage() {
                           <Input
                             placeholder="Nome"
                             value={clientDraft.name}
+                            disabled={clientSaving}
                             onChange={(event) =>
                               setClientDraft((prev) => ({
                                 ...prev,
@@ -4613,6 +5150,7 @@ export default function CrmPage() {
                             placeholder="Email"
                             type="email"
                             value={clientDraft.email}
+                            disabled={clientSaving}
                             onChange={(event) =>
                               setClientDraft((prev) => ({
                                 ...prev,
@@ -4623,6 +5161,7 @@ export default function CrmPage() {
                           <Input
                             placeholder="Telefone"
                             value={clientDraft.phone}
+                            disabled={clientSaving}
                             onChange={(event) =>
                               setClientDraft((prev) => ({
                                 ...prev,
@@ -4638,6 +5177,7 @@ export default function CrmPage() {
                               type="date"
                               placeholder="Próxima ação"
                               value={clientDraft.next_action_at}
+                              disabled={clientSaving}
                               onChange={(event) =>
                                 setClientDraft((prev) => ({
                                   ...prev,
@@ -4647,13 +5187,14 @@ export default function CrmPage() {
                             />
                             <button
                               type="button"
+                              disabled={clientSaving}
                               onClick={() =>
                                 setClientDraft((prev) => ({
                                   ...prev,
                                   next_action_at: new Date().toISOString().slice(0, 10)
                                 }))
                               }
-                              className="inline-flex rounded-full px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-zinc-200 transition accent-outline accent-sheen accent-focus focus-visible:outline-none hover:text-zinc-100"
+                              className="inline-flex rounded-full px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-zinc-200 transition accent-outline accent-sheen accent-focus focus-visible:outline-none hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               Definir hoje
                             </button>
@@ -4661,6 +5202,7 @@ export default function CrmPage() {
                           <textarea
                             placeholder="Descrição / contexto do cliente"
                             value={clientDraft.descricao_contexto}
+                            disabled={clientSaving}
                             onChange={(event) =>
                               setClientDraft((prev) => ({
                                 ...prev,
@@ -4691,8 +5233,15 @@ export default function CrmPage() {
                           type="button"
                           onClick={handleSaveClient}
                           disabled={clientSaving}
+                          isLoading={clientSaving}
                         >
-                          {clientSaving ? "Salvando..." : "Salvar cliente"}
+                          {clientSaving
+                            ? isCreatingClient
+                              ? "Criando..."
+                              : "Salvando..."
+                            : isCreatingClient
+                              ? "Criar cliente"
+                              : "Salvar cliente"}
                         </Button>
                       </div>
                     </motion.div>
@@ -4996,7 +5545,7 @@ export default function CrmPage() {
                           type="button"
                           variant="ghost"
                           onClick={closeStatusTransitionModal}
-                          disabled={statusModalSaving}
+                          disabled={isSavingPipeline}
                         >
                           Cancelar
                         </Button>
@@ -5004,9 +5553,9 @@ export default function CrmPage() {
                           type="button"
                           variant="secondary"
                           onClick={handleConfirmStatusTransition}
-                          disabled={statusModalSaving}
+                          disabled={isSavingPipeline}
                         >
-                          {statusModalSaving
+                          {isSavingPipeline
                             ? "Salvando..."
                             : statusModalIsActivityOnly
                               ? "Salvar atividade"

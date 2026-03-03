@@ -169,6 +169,13 @@ export type CrmClientBundle = {
 
 const MATCH_PAGE_SIZE = 6;
 
+const sleep = async (ms: number) => {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+};
+
 const parseDateSafe = (value?: string | null) => {
   if (!value) return null;
   const parsed = new Date(value);
@@ -679,18 +686,26 @@ export const fetchCrmClientBundle = async (args: {
 export const createCrmClientsQueryOptions = (args: {
   supabase: SupabaseClient;
   organizationId: string;
+  debugDelayMs?: number;
 }) =>
   queryOptions({
     queryKey: crmQueryKeys.clients(args.organizationId),
-    queryFn: () => fetchCrmClientsBundle(args)
+    queryFn: async () => {
+      await sleep(args.debugDelayMs ?? 0);
+      return fetchCrmClientsBundle(args);
+    }
   });
 
 export const createCrmClientBundleQueryOptions = (args: {
   supabase: SupabaseClient;
   organizationId: string;
   clientId: string;
+  debugDelayMs?: number;
 }) =>
   queryOptions({
     queryKey: crmQueryKeys.clientBundle(args.organizationId, args.clientId),
-    queryFn: () => fetchCrmClientBundle(args)
+    queryFn: async () => {
+      await sleep(args.debugDelayMs ?? 0);
+      return fetchCrmClientBundle(args);
+    }
   });
