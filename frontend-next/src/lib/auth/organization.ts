@@ -12,11 +12,17 @@ export type OrganizationSummary = {
   seatsTotal: number;
 };
 
+export type OrganizationInviteStatus =
+  | "pending"
+  | "accepted"
+  | "revoked"
+  | "expired";
+
 export type OrganizationInvite = {
   id: string;
   email: string;
   role: OrganizationRole;
-  status: "pending" | "accepted" | "revoked" | "expired";
+  status: OrganizationInviteStatus;
   inviteToken: string;
   createdAt: string;
   expiresAt: string | null;
@@ -167,6 +173,22 @@ export type AcceptInviteResult = {
 type OrganizationSubscriptionRow = {
   seats_total?: number | null;
   seats_used?: number | null;
+};
+
+type IncreaseSeatsRpcRow = {
+  organization_id?: string | null;
+  seats_total?: number | null;
+  seats_used?: number | null;
+  pending_invites?: number | null;
+  seats_available?: number | null;
+};
+
+export type IncreaseOrganizationSeatsResult = {
+  organizationId: string;
+  seatsTotal: number;
+  seatsUsed: number;
+  pendingInvites: number;
+  seatsAvailable: number;
 };
 
 type BootstrapContextRpcRow = {
@@ -346,6 +368,26 @@ function getPersonalWorkspaceName(user: User): string {
     return `Workspace pessoal (${user.email})`;
   }
   return "Workspace pessoal";
+}
+
+function isInviteExpired(expiresAt: string | null): boolean {
+  if (!expiresAt) return false;
+  const parsed = new Date(expiresAt);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return parsed.getTime() <= Date.now();
+}
+
+function toEffectiveInviteStatus(
+  rawStatus: string | null | undefined,
+  expiresAt: string | null
+): OrganizationInviteStatus {
+  if (rawStatus === "accepted" || rawStatus === "revoked" || rawStatus === "expired") {
+    return rawStatus;
+  }
+  if (rawStatus === "pending" && isInviteExpired(expiresAt)) {
+    return "expired";
+  }
+  return "pending";
 }
 
 async function requireUser(supabase: SupabaseClient): Promise<User> {
@@ -741,15 +783,15 @@ export async function getOrganizationContext(
   const invites = ((inviteRows as unknown[]) ?? []).map(
     (row): OrganizationInvite => {
       const item = row as Record<string, unknown>;
+      const expiresAt = typeof item.expires_at === "string" ? item.expires_at : null;
       return {
         id: String(item.id ?? ""),
         email: String(item.email ?? ""),
         role: (item.role as OrganizationRole) ?? "member",
-        status:
-          (item.status as "pending" | "accepted" | "revoked" | "expired") ?? "pending",
+        status: toEffectiveInviteStatus(item.status as string | undefined, expiresAt),
         inviteToken: String(item.invite_token ?? ""),
         createdAt: String(item.created_at ?? ""),
-        expiresAt: typeof item.expires_at === "string" ? item.expires_at : null
+        expiresAt
       };
     }
   );
@@ -1207,6 +1249,68 @@ export async function revokeOrganizationInvite(
   }
 
   return false;
+}
+
+export async function increaseOrganizationSeats(
+  supabase: SupabaseClient,
+  organizationIdRaw: string,
+  additionalSeatsRaw: number
+): Promise<IncreaseOrganizationSeatsResult> {
+  await requireUser(supabase);
+
+  const organizationId = organizationIdRaw.trim();
+  if (!organizationId) {
+    throw new Error("organization_id_invalida");
+  }
+
+  const additionalSeats = Number.isFinite(additionalSeatsRaw)
+    ? Math.max(1, Math.trunc(additionalSeatsRaw))
+    : 1;
+
+  const response = await supabase
+    .rpc("increase_organization_seats", {
+      p_organization_id: organizationId,
+      p_additional_seats: additionalSeats
+    })
+    .maybeSingle();
+
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+
+  const row = (response.data as IncreaseSeatsRpcRow | null) ?? null;
+  if (!row || typeof row.organization_id !== "string") {
+    throw new Error("Resposta invalida ao aumentar vagas.");
+  }
+
+  const seatsTotal =
+    typeof row.seats_total === "number" && Number.isFinite(row.seats_total)
+      ? Math.max(0, Math.trunc(row.seats_total))
+      : 0;
+
+  const seatsUsed =
+    typeof row.seats_used === "number" && Number.isFinite(row.seats_used)
+      ? Math.max(0, Math.trunc(row.seats_used))
+      : 0;
+
+  const pendingInvites =
+    typeof row.pending_invites === "number" && Number.isFinite(row.pending_invites)
+      ? Math.max(0, Math.trunc(row.pending_invites))
+      : 0;
+
+  const fallbackSeatsAvailable = Math.max(0, seatsTotal - (seatsUsed + pendingInvites));
+  const seatsAvailable =
+    typeof row.seats_available === "number" && Number.isFinite(row.seats_available)
+      ? Math.max(0, Math.trunc(row.seats_available))
+      : fallbackSeatsAvailable;
+
+  return {
+    organizationId: row.organization_id,
+    seatsTotal,
+    seatsUsed,
+    pendingInvites,
+    seatsAvailable
+  };
 }
 
 export async function getInvitePreview(supabase: SupabaseClient, token: string) {

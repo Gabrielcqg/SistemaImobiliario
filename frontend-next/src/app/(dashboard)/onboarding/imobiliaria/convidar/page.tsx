@@ -7,9 +7,11 @@ import Button from "@/components/ui/Button";
 import {
   getMyOrgRole,
   getOrganizationContext,
+  increaseOrganizationSeats,
   revokeOrganizationInvite,
   type OrganizationRole,
-  type OrganizationContext
+  type OrganizationContext,
+  type OrganizationInviteStatus
 } from "@/lib/auth/organization";
 import { dispatchOrganizationContextRefresh } from "@/lib/auth/organizationEvents";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -71,6 +73,20 @@ function formatDate(value: string | null) {
   return date.toLocaleDateString("pt-BR");
 }
 
+function statusLabel(status: OrganizationInviteStatus) {
+  if (status === "pending") return "Pendente";
+  if (status === "accepted") return "Aceito";
+  if (status === "revoked") return "Cancelado";
+  return "Expirado";
+}
+
+function statusStyle(status: OrganizationInviteStatus) {
+  if (status === "pending") return "border-emerald-500/35 bg-emerald-500/10 text-emerald-200";
+  if (status === "accepted") return "border-sky-500/35 bg-sky-500/10 text-sky-200";
+  if (status === "revoked") return "border-red-500/35 bg-red-500/10 text-red-200";
+  return "border-amber-500/35 bg-amber-500/10 text-amber-200";
+}
+
 async function createInvitesServerSide(
   organizationId: string,
   emails: string[]
@@ -123,8 +139,12 @@ export default function BrokerageInvitesOnboardingPage() {
   const [invitesLoading, setInvitesLoading] = useState(false);
   const [workingInviteId, setWorkingInviteId] = useState<string | null>(null);
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
+  const [seatsLoading, setSeatsLoading] = useState(false);
+  const [seatsInput, setSeatsInput] = useState("1");
+  const [seatsError, setSeatsError] = useState<string | null>(null);
+  const [seatsStatus, setSeatsStatus] = useState<string | null>(null);
   const [latestInviteLinks, setLatestInviteLinks] = useState<
-    Array<{ email: string; link: string; status: string }>
+    Array<{ email: string; link: string; status: string; inviteToken: string }>
   >([]);
 
   const loadContext = useCallback(async () => {
@@ -168,8 +188,24 @@ export default function BrokerageInvitesOnboardingPage() {
     void loadContext();
   }, [loadContext]);
 
-  const pendingInvites = useMemo(
+  useEffect(() => {
+    if (!context) return;
+    const pendingTokens = new Set(
+      context.invites
+        .filter((invite) => invite.status === "pending")
+        .map((invite) => invite.inviteToken)
+    );
+    setLatestInviteLinks((previous) =>
+      previous.filter((invite) => pendingTokens.has(invite.inviteToken))
+    );
+  }, [context]);
+
+  const activeInvites = useMemo(
     () => context?.invites.filter((invite) => invite.status === "pending") ?? [],
+    [context?.invites]
+  );
+  const inviteHistory = useMemo(
+    () => context?.invites.filter((invite) => invite.status !== "pending") ?? [],
     [context?.invites]
   );
 
@@ -180,7 +216,7 @@ export default function BrokerageInvitesOnboardingPage() {
   const seatsPending = context?.pendingInvites ?? 0;
   const seatsReserved = seatsUsed + seatsPending;
   const seatsAvailable = Math.max(0, seatsTotal - seatsReserved);
-  const canManageInvites = myOrgRole === "owner";
+  const canManageTeam = myOrgRole === "owner" || myOrgRole === "admin";
 
   const buildInviteLink = (token: string) =>
     typeof window !== "undefined"
@@ -200,7 +236,7 @@ export default function BrokerageInvitesOnboardingPage() {
   };
 
   const handleSendInvites = async () => {
-    if (!context || !canManageInvites) {
+    if (!context || !canManageTeam) {
       return;
     }
 
@@ -228,7 +264,8 @@ export default function BrokerageInvitesOnboardingPage() {
         result.invites.map((invite) => ({
           email: invite.email,
           link: invite.link,
-          status: invite.status
+          status: invite.status,
+          inviteToken: invite.inviteToken
         }))
       );
 
@@ -288,7 +325,7 @@ export default function BrokerageInvitesOnboardingPage() {
   };
 
   const handleResendInvite = async (inviteId: string, email: string) => {
-    if (!context || !canManageInvites) {
+    if (!context || !canManageTeam) {
       return;
     }
 
@@ -302,7 +339,8 @@ export default function BrokerageInvitesOnboardingPage() {
         result.invites.map((invite) => ({
           email: invite.email,
           link: invite.link,
-          status: invite.status
+          status: invite.status,
+          inviteToken: invite.inviteToken
         }))
       );
 
@@ -334,8 +372,8 @@ export default function BrokerageInvitesOnboardingPage() {
     }
   };
 
-  const handleCancelInvite = async (inviteId: string) => {
-    if (!context || !canManageInvites) {
+  const handleCancelInvite = async (inviteId: string, inviteToken: string) => {
+    if (!context || !canManageTeam) {
       return;
     }
 
@@ -346,6 +384,25 @@ export default function BrokerageInvitesOnboardingPage() {
     try {
       const revoked = await revokeOrganizationInvite(supabase, inviteId);
       setInviteStatus(revoked ? "Convite cancelado." : "Convite ja nao estava pendente.");
+      if (revoked) {
+        setLatestInviteLinks((previous) =>
+          previous.filter((invite) => invite.inviteToken !== inviteToken)
+        );
+        setContext((previous) => {
+          if (!previous) return previous;
+          const nextInvites = previous.invites.map((invite) =>
+            invite.id === inviteId
+              ? { ...invite, status: "revoked" as const, expiresAt: new Date().toISOString() }
+              : invite
+          );
+          const nextPending = nextInvites.filter((invite) => invite.status === "pending").length;
+          return {
+            ...previous,
+            invites: nextInvites,
+            pendingInvites: nextPending
+          };
+        });
+      }
       await loadContext();
       dispatchOrganizationContextRefresh();
     } catch (cancelError) {
@@ -356,6 +413,56 @@ export default function BrokerageInvitesOnboardingPage() {
       );
     } finally {
       setWorkingInviteId(null);
+    }
+  };
+
+  const handleIncreaseSeats = async () => {
+    if (!context || !canManageTeam) {
+      return;
+    }
+
+    const requestedSeats = Number.parseInt(seatsInput, 10);
+    if (!Number.isFinite(requestedSeats) || requestedSeats < 1) {
+      setSeatsError("Informe um numero valido de vagas para adicionar.");
+      return;
+    }
+
+    setSeatsLoading(true);
+    setSeatsError(null);
+    setSeatsStatus(null);
+
+    try {
+      const result = await increaseOrganizationSeats(
+        supabase,
+        context.organization.id,
+        requestedSeats
+      );
+      setContext((previous) => {
+        if (!previous) return previous;
+        return {
+          ...previous,
+          organization: {
+            ...previous.organization,
+            seatsTotal: result.seatsTotal
+          },
+          membersUsed: result.seatsUsed,
+          pendingInvites: result.pendingInvites
+        };
+      });
+      setSeatsStatus(
+        `Limite atualizado para ${result.seatsTotal} vagas. Disponiveis agora: ${result.seatsAvailable}.`
+      );
+      setSeatsInput("1");
+      await loadContext();
+      dispatchOrganizationContextRefresh();
+    } catch (increaseError) {
+      setSeatsError(
+        increaseError instanceof Error
+          ? increaseError.message
+          : "Nao foi possivel aumentar as vagas agora."
+      );
+    } finally {
+      setSeatsLoading(false);
     }
   };
 
@@ -410,12 +517,12 @@ export default function BrokerageInvitesOnboardingPage() {
     );
   }
 
-  if (myOrgRole !== "owner") {
+  if (myOrgRole !== "owner" && myOrgRole !== "admin") {
     return (
       <section className="mx-auto w-full max-w-3xl space-y-4 rounded-2xl border border-red-500/35 bg-red-500/10 p-6">
         <h2 className="text-xl font-semibold text-white">403 | Sem permissao</h2>
         <p className="text-sm text-red-100">
-          Apenas o criador da organizacao (owner) pode acessar o onboarding da equipe.
+          Apenas owner/admin podem acessar o onboarding da equipe.
         </p>
         <div className="flex flex-wrap gap-3">
           <Link href="/buscador" className="text-sm text-white underline underline-offset-4">
@@ -477,6 +584,55 @@ export default function BrokerageInvitesOnboardingPage() {
           (ativos + pendentes).
         </p>
 
+        <div
+          className={`rounded-xl border p-4 ${
+            seatsAvailable <= 0
+              ? "border-amber-400/45 bg-amber-500/10"
+              : "border-zinc-800 bg-black/30"
+          }`}
+        >
+          <p className="text-sm font-medium text-white">
+            {seatsAvailable <= 0
+              ? "Voce atingiu o limite de vagas da equipe."
+              : "Precisa adicionar mais vagas?"}
+          </p>
+          <p className="mt-1 text-xs text-zinc-300">
+            Vagas totais: {seatsTotal} · usadas: {seatsUsed} · pendentes: {seatsPending} ·
+            disponiveis: {seatsAvailable}
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <label htmlFor="add-seats-input" className="text-xs text-zinc-300">
+              Adicionar vagas
+            </label>
+            <input
+              id="add-seats-input"
+              type="number"
+              min={1}
+              inputMode="numeric"
+              className="accent-focus w-24 rounded-lg border border-zinc-700 bg-black/40 px-2 py-1.5 text-sm text-white focus:outline-none"
+              value={seatsInput}
+              onChange={(event) => setSeatsInput(event.target.value)}
+              disabled={!canManageTeam || seatsLoading}
+            />
+            <Button onClick={handleIncreaseSeats} disabled={!canManageTeam || seatsLoading}>
+              {seatsLoading ? "Atualizando..." : "Aumentar vagas"}
+            </Button>
+          </div>
+          {!canManageTeam ? (
+            <p className="mt-2 text-xs text-amber-200">
+              Apenas owner/admin podem aumentar vagas.
+            </p>
+          ) : null}
+          {seatsError ? (
+            <p className="mt-2 rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+              {seatsError}
+            </p>
+          ) : null}
+          {seatsStatus ? (
+            <p className="mt-2 rounded-lg accent-alert px-3 py-2 text-xs">{seatsStatus}</p>
+          ) : null}
+        </div>
+
         <label htmlFor="brokerage-invite-input" className="text-sm text-zinc-300">
           Convide por e-mail (separe por virgula ou linha)
         </label>
@@ -486,17 +642,17 @@ export default function BrokerageInvitesOnboardingPage() {
           placeholder="joao@imobiliaria.com, maria@imobiliaria.com"
           value={inviteInput}
           onChange={(event) => setInviteInput(event.target.value)}
-          disabled={invitesLoading || !canManageInvites}
+          disabled={invitesLoading || !canManageTeam}
         />
 
         <div className="flex flex-wrap items-center gap-3">
           <Button
             onClick={handleSendInvites}
             disabled={
-              invitesLoading || !canManageInvites || seatsAvailable <= 0 || inviteInput.trim().length === 0
+              invitesLoading || !canManageTeam || seatsAvailable <= 0 || inviteInput.trim().length === 0
             }
             aria-disabled={
-              invitesLoading || !canManageInvites || seatsAvailable <= 0 || inviteInput.trim().length === 0
+              invitesLoading || !canManageTeam || seatsAvailable <= 0 || inviteInput.trim().length === 0
             }
           >
             {invitesLoading ? "Enviando convites..." : "Enviar convites"}
@@ -517,9 +673,15 @@ export default function BrokerageInvitesOnboardingPage() {
           </Link>
         </div>
 
-        {!canManageInvites ? (
+        {!canManageTeam ? (
           <p className="text-sm text-amber-200">
-            Apenas o owner pode enviar ou cancelar convites.
+            Apenas owner/admin podem enviar, reenviar ou cancelar convites.
+          </p>
+        ) : null}
+
+        {seatsAvailable <= 0 ? (
+          <p className="text-sm text-amber-200">
+            Sem vagas disponiveis. Use o bloco acima para aumentar o limite da equipe.
           </p>
         ) : null}
 
@@ -538,12 +700,12 @@ export default function BrokerageInvitesOnboardingPage() {
         {latestInviteLinks.length > 0 ? (
           <div className="space-y-2 rounded-xl border border-zinc-800 bg-black/30 p-3">
             <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
-              Links gerados agora
+              Links ativos gerados agora
             </p>
             <ul className="space-y-2">
               {latestInviteLinks.map((invite) => (
                 <li
-                  key={`${invite.email}-${invite.link}`}
+                  key={`${invite.email}-${invite.inviteToken}`}
                   className="rounded-lg border border-zinc-800 px-3 py-2"
                 >
                   <p className="text-sm text-zinc-100">
@@ -567,18 +729,23 @@ export default function BrokerageInvitesOnboardingPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-5">
-          <h3 className="text-lg font-semibold text-white">Convites pendentes</h3>
-          {pendingInvites.length === 0 ? (
+          <h3 className="text-lg font-semibold text-white">Convites ativos</h3>
+          {activeInvites.length === 0 ? (
             <p className="text-sm text-zinc-400">Nenhum convite pendente no momento.</p>
           ) : (
             <ul className="space-y-3">
-              {pendingInvites.map((invite) => (
+              {activeInvites.map((invite) => (
                 <li
                   key={invite.id}
                   className="rounded-lg border border-zinc-800 bg-black/40 px-3 py-3"
                 >
                   <p className="text-sm font-medium text-zinc-100">{invite.email}</p>
                   <p className="mt-1 text-xs text-zinc-500">
+                    <span
+                      className={`mr-2 inline-flex rounded-full border px-2 py-0.5 ${statusStyle(invite.status)}`}
+                    >
+                      {statusLabel(invite.status)}
+                    </span>
                     Expira em {formatDate(invite.expiresAt)} · role {invite.role}
                   </p>
                   <div className="mt-2 flex flex-wrap gap-3 text-xs">
@@ -592,7 +759,7 @@ export default function BrokerageInvitesOnboardingPage() {
                     <button
                       type="button"
                       className="accent-outline accent-sheen accent-focus rounded-full px-2.5 py-1 text-zinc-200 hover:text-white focus-visible:outline-none"
-                      disabled={workingInviteId === invite.id || !canManageInvites}
+                      disabled={workingInviteId === invite.id || !canManageTeam}
                       onClick={() => void handleResendInvite(invite.id, invite.email)}
                     >
                       {workingInviteId === invite.id ? "Processando..." : "Reenviar"}
@@ -600,8 +767,8 @@ export default function BrokerageInvitesOnboardingPage() {
                     <button
                       type="button"
                       className="accent-outline accent-sheen accent-focus rounded-full px-2.5 py-1 text-red-200 hover:text-white focus-visible:outline-none"
-                      disabled={workingInviteId === invite.id || !canManageInvites}
-                      onClick={() => void handleCancelInvite(invite.id)}
+                      disabled={workingInviteId === invite.id || !canManageTeam}
+                      onClick={() => void handleCancelInvite(invite.id, invite.inviteToken)}
                     >
                       Cancelar
                     </button>
@@ -639,15 +806,22 @@ export default function BrokerageInvitesOnboardingPage() {
 
       <section className="space-y-2 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-5">
         <h3 className="text-lg font-semibold text-white">Historico de convites</h3>
-        {context.invites.length === 0 ? (
-          <p className="text-sm text-zinc-400">Voce ainda nao enviou convites.</p>
+        {inviteHistory.length === 0 ? (
+          <p className="text-sm text-zinc-400">
+            Nenhum convite cancelado, aceito ou expirado no historico.
+          </p>
         ) : (
           <ul className="grid gap-2 sm:grid-cols-2">
-            {context.invites.map((invite) => (
+            {inviteHistory.map((invite) => (
               <li key={invite.id} className="rounded-lg border border-zinc-800 bg-black/40 px-3 py-2">
                 <p className="text-sm text-zinc-100">{invite.email}</p>
                 <p className="text-xs text-zinc-500">
-                  {invite.status} · criado em {formatDate(invite.createdAt)}
+                  <span
+                    className={`mr-2 inline-flex rounded-full border px-2 py-0.5 ${statusStyle(invite.status)}`}
+                  >
+                    {statusLabel(invite.status)}
+                  </span>
+                  criado em {formatDate(invite.createdAt)}
                 </p>
               </li>
             ))}
