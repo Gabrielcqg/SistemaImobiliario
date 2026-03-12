@@ -241,6 +241,7 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
                   alt={listing.title ?? "Listing"}
                   fill
                   unoptimized={shouldBypassNextImageOptimizer}
+                  referrerPolicy="no-referrer"
                   sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
                   className="object-cover transition duration-200 group-hover:scale-[1.01]"
                 />
@@ -282,6 +283,7 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
                   alt={listing.title ?? "Listing"}
                   fill
                   unoptimized={shouldBypassNextImageOptimizer}
+                  referrerPolicy="no-referrer"
                   sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
                   className="object-cover"
                 />
