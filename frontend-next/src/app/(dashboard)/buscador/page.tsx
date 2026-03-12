@@ -779,6 +779,30 @@ export default function BuscadorPage() {
       });
     };
 
+    const syncUpdatedListing = (listing: RadarListing) => {
+      if (!listing?.id) return;
+
+      setDisplayListings((prev) => {
+        let changed = false;
+        const next = prev.map((item) => {
+          if (item.id !== listing.id) return item;
+          changed = true;
+          return { ...item, ...listing };
+        });
+        return changed ? next : prev;
+      });
+
+      setRadarListings((prev) => {
+        let changed = false;
+        const next = prev.map((item) => {
+          if (item.id !== listing.id) return item;
+          changed = true;
+          return { ...item, ...listing };
+        });
+        return changed ? next : prev;
+      });
+    };
+
     const channel = supabase
       .channel("radar-listings")
       .on(
@@ -894,6 +918,20 @@ export default function BuscadorPage() {
               REALTIME_FLUSH_MS
             );
           }
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "listings",
+          filter: "city=eq.Campinas"
+        },
+        (payload) => {
+          const listing = payload.new as RadarListing;
+          if (!listing) return;
+          syncUpdatedListing(listing);
         }
       )
       .subscribe((status) => {
