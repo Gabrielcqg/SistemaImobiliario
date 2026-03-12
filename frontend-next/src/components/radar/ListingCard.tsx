@@ -87,6 +87,16 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
   }, [listing.first_seen_at]);
 
   const fullTitle = (listing.title ?? "Imóvel sem título").trim();
+  const shouldBypassNextImageOptimizer = useMemo(() => {
+    if (!listing.main_image_url) return false;
+
+    try {
+      return new URL(listing.main_image_url).hostname === "resizedimgs.vivareal.com";
+    } catch {
+      return false;
+    }
+  }, [listing.main_image_url]);
+
   const displayTitle = useMemo(() => {
     const words = fullTitle.split(/\s+/).filter(Boolean);
     if (words.length <= 12) return fullTitle;
@@ -230,6 +240,7 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
                   src={listing.main_image_url}
                   alt={listing.title ?? "Listing"}
                   fill
+                  unoptimized={shouldBypassNextImageOptimizer}
                   sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
                   className="object-cover transition duration-200 group-hover:scale-[1.01]"
                 />
@@ -270,6 +281,7 @@ export default function ListingCard({ listing, className = "" }: ListingCardProp
                   src={listing.main_image_url}
                   alt={listing.title ?? "Listing"}
                   fill
+                  unoptimized={shouldBypassNextImageOptimizer}
                   sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
                   className="object-cover"
                 />
